@@ -12,9 +12,10 @@
 
   :jvm-opts
   ["-Djava.awt.headless=true"
-   ;; Knossos WGL checker is memory-hungry for large histories; 4 GB keeps it
-   ;; from OOM-ing on runs that include nemesis-induced timeout (:info) ops.
-   "-Xmx4g"
+   ;; Leave headroom for Docker, MinIO, and five DB containers on GitHub's
+   ;; ubuntu-latest runners. The CI workload is intentionally small (~60 ops),
+   ;; so a 2 GB checker heap is enough without risking host-level OOM kills.
+   "-Xmx2g"
    ;; jetcd uses Netty which reflectively accesses JDK internals on Java 17+.
    "--add-opens=java.base/java.lang=ALL-UNNAMED"
    "--add-opens=java.base/java.nio=ALL-UNNAMED"
