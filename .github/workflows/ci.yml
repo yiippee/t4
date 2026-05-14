@@ -80,6 +80,53 @@ jobs:
       - name: Test (integration)
         run: go test -short -timeout 360s -count=1 ./tests/integration
 
+  minio-cli-smoke:
+    name: MinIO CLI Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Start MinIO
+        run: |
+          docker run -d --name t4-minio-smoke \
+            -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio:latest server /data
+
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:9000/minio/health/live; then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          docker logs t4-minio-smoke
+          exit 1
+
+      - name: Run MinIO CLI smoke
+        run: go test -timeout 120s -count=1 ./tests/e2e -run TestMinIOCLISmoke
+        env:
+          T4_E2E_MINIO: "1"
+          MINIO_ENDPOINT: http://127.0.0.1:9000
+          MINIO_ACCESS_KEY: minioadmin
+          MINIO_SECRET_KEY: minioadmin
+          MINIO_REGION: us-east-1
+
+      - name: Dump MinIO logs
+        if: failure()
+        run: docker logs t4-minio-smoke || true
+
   test-race-linux:
     name: Test Race (Linux)
     runs-on: ubuntu-latest
