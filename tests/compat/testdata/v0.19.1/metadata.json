@@ -1,0 +1,12 @@
+{
+  "baseline": "v0.19.1",
+  "branch_checkpoint": "checkpoint/0000000001/00000000000000000002/manifest.json",
+  "branch_id": "compat-branch",
+  "checkpoint_key_a": "old-checkpoint-a",
+  "checkpoint_key_b": "old-checkpoint-b",
+  "checkpoint_prefix": "/compat/checkpoint/",
+  "local_key_a": "old-local-a",
+  "local_key_b": "old-local-b",
+  "wal_replay_key": "old-wal-after",
+  "wal_replay_key_path": "/compat/wal/after"
+}

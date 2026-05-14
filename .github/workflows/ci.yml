@@ -60,7 +60,8 @@ jobs:
             ./etcd \
             ./etcd/auth \
             ./internal/... \
-            ./pkg/object
+            ./pkg/object \
+            ./tests/compat
 
   test-integration-linux:
     name: Test Integration (Linux)
