@@ -171,6 +171,7 @@ Key API differences from the etcd v3 Go client:
 | `MemberAdd` / `MemberRemove` / `MemberUpdate` / `MemberPromote` | Not supported                                 | Not needed for standard clients               |
 | etcd v2 API                                                     | Not supported                                 | Migrate to v3 first                           |
 | gRPC gateway (HTTP/JSON)                                        | Not included                                  | Use a gRPC proxy (e.g. grpc-gateway) in front |
+| `WatchResponse` fragmentation (`Fragment=true` flag)            | Not supported in v1                           | T4 caps every frame at 64 events and never splits a single oversize frame; events themselves are bounded by the request-size limit so a single frame cannot exceed gRPC max-send. Clients that rely on the etcd Fragment flag should treat T4 as if it never sets it. |
 
 ## Slow watcher cancellation
 
