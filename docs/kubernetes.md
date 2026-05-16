@@ -293,7 +293,7 @@ spec:
 
 ## IAM / S3 permissions
 
-T4 needs the following S3 permissions on the bucket:
+T4 needs the following S3 permissions on the bucket. This list is the canonical minimum policy — see [`security.md`](security.md#s3-bucket-security) for the full version with discussion.
 
 ```json
 {
@@ -302,7 +302,8 @@ T4 needs the following S3 permissions on the bucket:
     "s3:GetObject",
     "s3:PutObject",
     "s3:DeleteObject",
-    "s3:ListBucket"
+    "s3:ListBucket",
+    "s3:HeadObject"
   ],
   "Resource": [
     "arn:aws:s3:::my-bucket",
