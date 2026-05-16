@@ -129,6 +129,7 @@ metadata.
 | `t4 branch fork` | `T4_BRANCH_ID` | `--branch-id` |
 | `t4 branch fork` | `T4_S3_ACCESS_KEY_ID` | `--s3-access-key-id` |
 | `t4 branch fork` | `T4_S3_BUCKET` | `--s3-bucket` |
+| `t4 branch fork` | `T4_S3_CA_BUNDLE` | `--s3-ca-bundle` |
 | `t4 branch fork` | `T4_S3_ENDPOINT` | `--s3-endpoint` |
 | `t4 branch fork` | `T4_S3_PREFIX` | `--s3-prefix` |
 | `t4 branch fork` | `T4_S3_PROFILE` | `--s3-profile` |
@@ -137,6 +138,7 @@ metadata.
 | `t4 branch unfork` | `T4_BRANCH_ID` | `--branch-id` |
 | `t4 branch unfork` | `T4_S3_ACCESS_KEY_ID` | `--s3-access-key-id` |
 | `t4 branch unfork` | `T4_S3_BUCKET` | `--s3-bucket` |
+| `t4 branch unfork` | `T4_S3_CA_BUNDLE` | `--s3-ca-bundle` |
 | `t4 branch unfork` | `T4_S3_ENDPOINT` | `--s3-endpoint` |
 | `t4 branch unfork` | `T4_S3_PREFIX` | `--s3-prefix` |
 | `t4 branch unfork` | `T4_S3_PROFILE` | `--s3-profile` |
@@ -144,6 +146,7 @@ metadata.
 | `t4 branch unfork` | `T4_S3_SECRET_ACCESS_KEY` | `--s3-secret-access-key` |
 | `t4 gc` | `T4_S3_ACCESS_KEY_ID` | `--s3-access-key-id` |
 | `t4 gc` | `T4_S3_BUCKET` | `--s3-bucket` |
+| `t4 gc` | `T4_S3_CA_BUNDLE` | `--s3-ca-bundle` |
 | `t4 gc` | `T4_S3_ENDPOINT` | `--s3-endpoint` |
 | `t4 gc` | `T4_S3_PREFIX` | `--s3-prefix` |
 | `t4 gc` | `T4_S3_PROFILE` | `--s3-profile` |
@@ -158,6 +161,7 @@ metadata.
 | `t4 restore checkpoint` | `T4_DATA_DIR` | `--data-dir` |
 | `t4 restore checkpoint` | `T4_S3_ACCESS_KEY_ID` | `--s3-access-key-id` |
 | `t4 restore checkpoint` | `T4_S3_BUCKET` | `--s3-bucket` |
+| `t4 restore checkpoint` | `T4_S3_CA_BUNDLE` | `--s3-ca-bundle` |
 | `t4 restore checkpoint` | `T4_S3_ENDPOINT` | `--s3-endpoint` |
 | `t4 restore checkpoint` | `T4_S3_PREFIX` | `--s3-prefix` |
 | `t4 restore checkpoint` | `T4_S3_PROFILE` | `--s3-profile` |
@@ -165,6 +169,7 @@ metadata.
 | `t4 restore checkpoint` | `T4_S3_SECRET_ACCESS_KEY` | `--s3-secret-access-key` |
 | `t4 restore list` | `T4_S3_ACCESS_KEY_ID` | `--s3-access-key-id` |
 | `t4 restore list` | `T4_S3_BUCKET` | `--s3-bucket` |
+| `t4 restore list` | `T4_S3_CA_BUNDLE` | `--s3-ca-bundle` |
 | `t4 restore list` | `T4_S3_ENDPOINT` | `--s3-endpoint` |
 | `t4 restore list` | `T4_S3_PREFIX` | `--s3-prefix` |
 | `t4 restore list` | `T4_S3_PROFILE` | `--s3-profile` |
@@ -198,6 +203,7 @@ metadata.
 | `t4 run` | `T4_READ_CONSISTENCY` | `--read-consistency` |
 | `t4 run` | `T4_S3_ACCESS_KEY_ID` | `--s3-access-key-id` |
 | `t4 run` | `T4_S3_BUCKET` | `--s3-bucket` |
+| `t4 run` | `T4_S3_CA_BUNDLE` | `--s3-ca-bundle` |
 | `t4 run` | `T4_S3_ENDPOINT` | `--s3-endpoint` |
 | `t4 run` | `T4_S3_PREFIX` | `--s3-prefix` |
 | `t4 run` | `T4_S3_PROFILE` | `--s3-profile` |
@@ -210,6 +216,7 @@ metadata.
 | `t4 run` | `T4_WATCH_SEND_TIMEOUT` | `--watch-send-timeout` |
 | `t4 status` | `T4_S3_ACCESS_KEY_ID` | `--s3-access-key-id` |
 | `t4 status` | `T4_S3_BUCKET` | `--s3-bucket` |
+| `t4 status` | `T4_S3_CA_BUNDLE` | `--s3-ca-bundle` |
 | `t4 status` | `T4_S3_ENDPOINT` | `--s3-endpoint` |
 | `t4 status` | `T4_S3_PREFIX` | `--s3-prefix` |
 | `t4 status` | `T4_S3_PROFILE` | `--s3-profile` |
@@ -228,6 +235,7 @@ Generated from the CLI flag definitions in Go. Run `go run ./hack/docgen` after 
 | `t4 branch fork` | `--checkpoint` | — | — | No | fork from this specific checkpoint key instead of the latest revision |
 | `t4 branch fork` | `--s3-access-key-id` | — | `T4_S3_ACCESS_KEY_ID` | No | t4 S3 access key ID; when set with --s3-secret-access-key, uses static credentials |
 | `t4 branch fork` | `--s3-bucket` | — | `T4_S3_BUCKET` | Yes | S3 bucket |
+| `t4 branch fork` | `--s3-ca-bundle` | — | `T4_S3_CA_BUNDLE` | No | PEM CA bundle file to trust for HTTPS to the S3 endpoint; use this for MinIO and other S3-compatible stores running behind a self-signed CA |
 | `t4 branch fork` | `--s3-endpoint` | — | `T4_S3_ENDPOINT` | No | custom S3 endpoint URL, e.g. for MinIO |
 | `t4 branch fork` | `--s3-prefix` | — | `T4_S3_PREFIX` | No | key prefix inside the S3 bucket |
 | `t4 branch fork` | `--s3-profile` | — | `T4_S3_PROFILE` | No | named AWS shared config profile to use; t4 only enables the AWS shared config chain when this is set (use 'default' to opt in to the default profile) |
@@ -236,6 +244,7 @@ Generated from the CLI flag definitions in Go. Run `go run ./hack/docgen` after 
 | `t4 branch unfork` | `--branch-id` | — | `T4_BRANCH_ID` | Yes | unique identifier for this branch (required) |
 | `t4 branch unfork` | `--s3-access-key-id` | — | `T4_S3_ACCESS_KEY_ID` | No | t4 S3 access key ID; when set with --s3-secret-access-key, uses static credentials |
 | `t4 branch unfork` | `--s3-bucket` | — | `T4_S3_BUCKET` | Yes | S3 bucket |
+| `t4 branch unfork` | `--s3-ca-bundle` | — | `T4_S3_CA_BUNDLE` | No | PEM CA bundle file to trust for HTTPS to the S3 endpoint; use this for MinIO and other S3-compatible stores running behind a self-signed CA |
 | `t4 branch unfork` | `--s3-endpoint` | — | `T4_S3_ENDPOINT` | No | custom S3 endpoint URL, e.g. for MinIO |
 | `t4 branch unfork` | `--s3-prefix` | — | `T4_S3_PREFIX` | No | key prefix inside the S3 bucket |
 | `t4 branch unfork` | `--s3-profile` | — | `T4_S3_PROFILE` | No | named AWS shared config profile to use; t4 only enables the AWS shared config chain when this is set (use 'default' to opt in to the default profile) |
@@ -244,6 +253,7 @@ Generated from the CLI flag definitions in Go. Run `go run ./hack/docgen` after 
 | `t4 gc` | `--keep` | `3` | — | No | number of most-recent checkpoints to retain |
 | `t4 gc` | `--s3-access-key-id` | — | `T4_S3_ACCESS_KEY_ID` | No | t4 S3 access key ID; when set with --s3-secret-access-key, uses static credentials |
 | `t4 gc` | `--s3-bucket` | — | `T4_S3_BUCKET` | Yes | S3 bucket |
+| `t4 gc` | `--s3-ca-bundle` | — | `T4_S3_CA_BUNDLE` | No | PEM CA bundle file to trust for HTTPS to the S3 endpoint; use this for MinIO and other S3-compatible stores running behind a self-signed CA |
 | `t4 gc` | `--s3-endpoint` | — | `T4_S3_ENDPOINT` | No | custom S3 endpoint URL, e.g. for MinIO |
 | `t4 gc` | `--s3-prefix` | — | `T4_S3_PREFIX` | No | key prefix inside the S3 bucket |
 | `t4 gc` | `--s3-profile` | — | `T4_S3_PROFILE` | No | named AWS shared config profile to use; t4 only enables the AWS shared config chain when this is set (use 'default' to opt in to the default profile) |
@@ -272,6 +282,7 @@ Generated from the CLI flag definitions in Go. Run `go run ./hack/docgen` after 
 | `t4 restore checkpoint` | `--data-dir` | — | `T4_DATA_DIR` | Yes | local directory to restore into (required; must not already contain a Pebble database) |
 | `t4 restore checkpoint` | `--s3-access-key-id` | — | `T4_S3_ACCESS_KEY_ID` | No | t4 S3 access key ID; when set with --s3-secret-access-key, uses static credentials |
 | `t4 restore checkpoint` | `--s3-bucket` | — | `T4_S3_BUCKET` | Yes | S3 bucket |
+| `t4 restore checkpoint` | `--s3-ca-bundle` | — | `T4_S3_CA_BUNDLE` | No | PEM CA bundle file to trust for HTTPS to the S3 endpoint; use this for MinIO and other S3-compatible stores running behind a self-signed CA |
 | `t4 restore checkpoint` | `--s3-endpoint` | — | `T4_S3_ENDPOINT` | No | custom S3 endpoint URL, e.g. for MinIO |
 | `t4 restore checkpoint` | `--s3-prefix` | — | `T4_S3_PREFIX` | No | key prefix inside the S3 bucket |
 | `t4 restore checkpoint` | `--s3-profile` | — | `T4_S3_PROFILE` | No | named AWS shared config profile to use; t4 only enables the AWS shared config chain when this is set (use 'default' to opt in to the default profile) |
@@ -279,6 +290,7 @@ Generated from the CLI flag definitions in Go. Run `go run ./hack/docgen` after 
 | `t4 restore checkpoint` | `--s3-secret-access-key` | — | `T4_S3_SECRET_ACCESS_KEY` | No | AWS secret access key |
 | `t4 restore list` | `--s3-access-key-id` | — | `T4_S3_ACCESS_KEY_ID` | No | t4 S3 access key ID; when set with --s3-secret-access-key, uses static credentials |
 | `t4 restore list` | `--s3-bucket` | — | `T4_S3_BUCKET` | Yes | S3 bucket |
+| `t4 restore list` | `--s3-ca-bundle` | — | `T4_S3_CA_BUNDLE` | No | PEM CA bundle file to trust for HTTPS to the S3 endpoint; use this for MinIO and other S3-compatible stores running behind a self-signed CA |
 | `t4 restore list` | `--s3-endpoint` | — | `T4_S3_ENDPOINT` | No | custom S3 endpoint URL, e.g. for MinIO |
 | `t4 restore list` | `--s3-prefix` | — | `T4_S3_PREFIX` | No | key prefix inside the S3 bucket |
 | `t4 restore list` | `--s3-profile` | — | `T4_S3_PROFILE` | No | named AWS shared config profile to use; t4 only enables the AWS shared config chain when this is set (use 'default' to opt in to the default profile) |
@@ -312,6 +324,7 @@ Generated from the CLI flag definitions in Go. Run `go run ./hack/docgen` after 
 | `t4 run` | `--read-consistency` | `linearizable` | `T4_READ_CONSISTENCY` | No | read consistency for follower nodes: linearizable (ReadIndex, etcd-compatible) or serializable (local, ~115x faster but may be slightly stale) |
 | `t4 run` | `--s3-access-key-id` | — | `T4_S3_ACCESS_KEY_ID` | No | t4 S3 access key ID; when set with --s3-secret-access-key, uses static credentials |
 | `t4 run` | `--s3-bucket` | — | `T4_S3_BUCKET` | No | S3 bucket |
+| `t4 run` | `--s3-ca-bundle` | — | `T4_S3_CA_BUNDLE` | No | PEM CA bundle file to trust for HTTPS to the S3 endpoint; use this for MinIO and other S3-compatible stores running behind a self-signed CA |
 | `t4 run` | `--s3-endpoint` | — | `T4_S3_ENDPOINT` | No | custom S3 endpoint URL, e.g. for MinIO |
 | `t4 run` | `--s3-prefix` | — | `T4_S3_PREFIX` | No | key prefix inside the S3 bucket |
 | `t4 run` | `--s3-profile` | — | `T4_S3_PROFILE` | No | named AWS shared config profile to use; t4 only enables the AWS shared config chain when this is set (use 'default' to opt in to the default profile) |
@@ -324,6 +337,7 @@ Generated from the CLI flag definitions in Go. Run `go run ./hack/docgen` after 
 | `t4 run` | `--watch-send-timeout` | `30s` | `T4_WATCH_SEND_TIMEOUT` | No | cancel a watch whose server-side send queue blocks for longer than this; clients receive a 'mvcc: watcher is slow' cancellation when possible |
 | `t4 status` | `--s3-access-key-id` | — | `T4_S3_ACCESS_KEY_ID` | No | t4 S3 access key ID; when set with --s3-secret-access-key, uses static credentials |
 | `t4 status` | `--s3-bucket` | — | `T4_S3_BUCKET` | Yes | S3 bucket |
+| `t4 status` | `--s3-ca-bundle` | — | `T4_S3_CA_BUNDLE` | No | PEM CA bundle file to trust for HTTPS to the S3 endpoint; use this for MinIO and other S3-compatible stores running behind a self-signed CA |
 | `t4 status` | `--s3-endpoint` | — | `T4_S3_ENDPOINT` | No | custom S3 endpoint URL, e.g. for MinIO |
 | `t4 status` | `--s3-prefix` | — | `T4_S3_PREFIX` | No | key prefix inside the S3 bucket |
 | `t4 status` | `--s3-profile` | — | `T4_S3_PROFILE` | No | named AWS shared config profile to use; t4 only enables the AWS shared config chain when this is set (use 'default' to opt in to the default profile) |
