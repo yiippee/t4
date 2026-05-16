@@ -124,6 +124,11 @@ jobs:
           MINIO_SECRET_KEY: minioadmin
           MINIO_REGION: us-east-1
 
+      - name: Run TLS e2e (starts its own MinIO with self-signed CA)
+        run: go test -timeout 240s -count=1 ./tests/e2e -run TestTLSE2E
+        env:
+          T4_E2E_MINIO: "1"
+
       - name: Dump MinIO logs
         if: failure()
         run: docker logs t4-minio-smoke || true

@@ -5,14 +5,26 @@ description: Securing T4 — TLS setup, mTLS between peers, client authenticatio
 
 ## Overview
 
-T4 has two independently configurable TLS surfaces:
+T4 has three independently configurable TLS surfaces:
 
 | Surface | Flag prefix | What it protects |
 |---|---|---|
 | **Client TLS** | `--client-tls-*` | etcd gRPC port (3379) — traffic between your application and T4 |
 | **Peer mTLS** | `--peer-tls-*` | WAL replication port (3380) — traffic between T4 nodes |
+| **S3 HTTPS** | `--s3-endpoint https://… --s3-ca-bundle …` | Object-store traffic between T4 and S3-compatible storage |
 
-Both use standard PEM-encoded certificates. You can enable either or both independently.
+All three use standard PEM-encoded certificates. You can enable any subset independently.
+
+## v1 TLS contract
+
+The following TLS guarantees are part of the v1 release contract and will not change without a major version bump:
+
+- **Minimum TLS version**: TLS 1.2 on every surface. TLS 1.0 and 1.1 are refused.
+- **Cipher suites**: Go's default TLS cipher list — TLS 1.3 always available; for TLS 1.2 only the AEAD-mode suites that Go marks as "preferred". The list is not configurable in v1.
+- **Certificate reload**: restart-only. Editing a cert file on disk does not take effect until the node is restarted. In-place reload is a v1 non-goal.
+- **S3 CA trust**: pin a CA bundle explicitly with `--s3-ca-bundle` (or `T4_S3_CA_BUNDLE`). System trust stores are not consulted when this flag is set — the bundle is the single source of truth. Required for MinIO and other private-CA S3-compatible stores; relying on `SSL_CERT_FILE` is unsupported because Go on macOS does not honor it.
+- **Peer mTLS**: both `--peer-tls-cert` and `--peer-tls-ca` must be supplied on every node; peer connections always verify the certificate. Plaintext peer mode and TLS-without-client-cert peer mode are not supported.
+- **Client TLS**: omitting `--client-tls-ca` enables server-only TLS (encryption with no client-cert verification). Supplying it enables full mTLS — clients without a CA-signed cert are refused.
 
 ---
 

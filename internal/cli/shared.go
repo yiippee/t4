@@ -18,6 +18,7 @@ type s3Flags struct {
 	Profile         string
 	AccessKeyID     string
 	SecretAccessKey string
+	CABundle        string
 }
 
 // config converts the flag values into an object.S3Config ready for
@@ -31,6 +32,7 @@ func (f *s3Flags) config() object.S3Config {
 		Profile:         f.Profile,
 		AccessKeyID:     f.AccessKeyID,
 		SecretAccessKey: f.SecretAccessKey,
+		CABundle:        f.CABundle,
 	}
 }
 
@@ -55,6 +57,7 @@ func addS3Flags(cmd *cobra.Command, bucketRequired bool) *s3Flags {
 	cmd.Flags().StringVar(&f.Profile, "s3-profile", "", "named AWS shared config profile to use; t4 only enables the AWS shared config chain when this is set (use 'default' to opt in to the default profile) (env: T4_S3_PROFILE)")
 	cmd.Flags().StringVar(&f.AccessKeyID, "s3-access-key-id", "", "t4 S3 access key ID; when set with --s3-secret-access-key, uses static credentials (env: T4_S3_ACCESS_KEY_ID)")
 	cmd.Flags().StringVar(&f.SecretAccessKey, "s3-secret-access-key", "", "AWS secret access key (env: T4_S3_SECRET_ACCESS_KEY)")
+	cmd.Flags().StringVar(&f.CABundle, "s3-ca-bundle", "", "PEM CA bundle file to trust for HTTPS to the S3 endpoint; use this for MinIO and other S3-compatible stores running behind a self-signed CA (env: T4_S3_CA_BUNDLE)")
 	if bucketRequired {
 		cmd.MarkFlagRequired("s3-bucket")
 	}
@@ -67,6 +70,7 @@ func addS3Flags(cmd *cobra.Command, bucketRequired bool) *s3Flags {
 			"s3-profile":           "T4_S3_PROFILE",
 			"s3-access-key-id":     "T4_S3_ACCESS_KEY_ID",
 			"s3-secret-access-key": "T4_S3_SECRET_ACCESS_KEY",
+			"s3-ca-bundle":         "T4_S3_CA_BUNDLE",
 		})
 	})
 	return f

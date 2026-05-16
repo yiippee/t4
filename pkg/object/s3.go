@@ -2,9 +2,13 @@ package object
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"os"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -54,6 +58,13 @@ type S3Config struct {
 	// set together.
 	AccessKeyID     string
 	SecretAccessKey string
+
+	// CABundle is an optional PEM-encoded CA certificate bundle to trust
+	// when talking HTTPS to the S3 endpoint. Empty means use the system
+	// trust store. Useful for MinIO and other S3-compatible stores running
+	// behind a self-signed CA. Honored regardless of OS — pin the bundle
+	// explicitly rather than relying on SSL_CERT_FILE / Keychain.
+	CABundle string
 }
 
 // NewS3StoreFromConfig creates an S3Store from explicit t4 S3 settings.
@@ -73,6 +84,13 @@ func NewS3StoreFromConfig(ctx context.Context, cfg S3Config) (*S3Store, error) {
 		return nil, fmt.Errorf("object/s3: credentials not configured; set T4_S3_ACCESS_KEY_ID and T4_S3_SECRET_ACCESS_KEY, or set T4_S3_PROFILE (for example \"default\")")
 	}
 	optFns := s3LoadOptions(cfg)
+	if cfg.CABundle != "" {
+		httpClient, err := s3HTTPClientWithCABundle(cfg.CABundle)
+		if err != nil {
+			return nil, err
+		}
+		optFns = append(optFns, awsconfig.WithHTTPClient(httpClient))
+	}
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, optFns...)
 	if err != nil {
 		return nil, fmt.Errorf("object/s3: load aws config: %w", err)
@@ -86,6 +104,29 @@ func NewS3StoreFromConfig(ctx context.Context, cfg S3Config) (*S3Store, error) {
 	}
 	client := s3.NewFromConfig(awsCfg, clientOpts...)
 	return NewS3Store(client, cfg.Bucket, cfg.Prefix), nil
+}
+
+// s3HTTPClientWithCABundle returns an *http.Client whose TLS transport trusts
+// only the CA roots in caBundlePath (in addition to none — the system pool is
+// intentionally omitted so the operator's stated CA is the single source of
+// truth for the S3 endpoint).
+func s3HTTPClientWithCABundle(caBundlePath string) (*http.Client, error) {
+	pemBytes, err := os.ReadFile(caBundlePath)
+	if err != nil {
+		return nil, fmt.Errorf("object/s3: read CA bundle: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		return nil, fmt.Errorf("object/s3: CA bundle %q contains no PEM certificates", caBundlePath)
+	}
+	return &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				RootCAs:    pool,
+				MinVersion: tls.VersionTLS12,
+			},
+		},
+	}, nil
 }
 
 func s3LoadOptions(cfg S3Config) []func(*awsconfig.LoadOptions) error {
