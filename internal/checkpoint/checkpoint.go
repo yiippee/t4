@@ -460,10 +460,11 @@ func restoreFromIndex(ctx context.Context, mgr *Manager, store object.Store, anc
 }
 
 // RestoreVersioned downloads a pinned version of a checkpoint index and
-// restores it to targetDir. SSTs and pebble meta are fetched from the live
-// store (content-addressed SSTs are immutable; meta files remain live as long
-// as they're within the keep window). Requires S3 versioning on the store.
-func (mgr *Manager) RestoreVersioned(ctx context.Context, store object.VersionedStore, objKey, versionID, targetDir string) (term uint64, revision int64, err error) {
+// restores it to targetDir. checkpointFileVersions may pin SST and Pebble meta
+// object versions referenced by the index. If an object is not present in the
+// map, RestoreVersioned falls back to reading the live object for compatibility
+// with older callers that captured only the index version.
+func (mgr *Manager) RestoreVersioned(ctx context.Context, store object.VersionedStore, objKey, versionID string, checkpointFileVersions map[string]string, targetDir string) (term uint64, revision int64, err error) {
 	rc, err := store.GetVersioned(ctx, objKey, versionID)
 	if err != nil {
 		return 0, 0, fmt.Errorf("checkpoint: download versioned %q@%s: %w", objKey, versionID, err)
@@ -479,13 +480,14 @@ func (mgr *Manager) RestoreVersioned(ctx context.Context, store object.Versioned
 	}
 	for _, sstKey := range idx.SSTFiles {
 		name := filepath.Base(sstKey)
-		if err := downloadFile(ctx, store, sstKey, filepath.Join(targetDir, name)); err != nil {
+		if err := downloadVersionedOrLive(ctx, store, sstKey, checkpointFileVersions, filepath.Join(targetDir, name)); err != nil {
 			return 0, 0, fmt.Errorf("checkpoint: download versioned sst %q: %w", sstKey, err)
 		}
 	}
 	metaPrefix := strings.TrimSuffix(objKey, "manifest.json")
 	for _, name := range idx.PebbleMeta {
-		if err := downloadFile(ctx, store, metaPrefix+name, filepath.Join(targetDir, name)); err != nil {
+		key := metaPrefix + name
+		if err := downloadVersionedOrLive(ctx, store, key, checkpointFileVersions, filepath.Join(targetDir, name)); err != nil {
 			return 0, 0, fmt.Errorf("checkpoint: download versioned meta %q: %w", name, err)
 		}
 	}
@@ -527,6 +529,24 @@ func downloadFile(ctx context.Context, store object.Store, key, dest string) err
 	defer f.Close()
 	_, err = io.Copy(f, rc)
 	return err
+}
+
+func downloadVersionedOrLive(ctx context.Context, store object.VersionedStore, key string, versions map[string]string, dest string) error {
+	if versionID := versions[key]; versionID != "" {
+		rc, err := store.GetVersioned(ctx, key, versionID)
+		if err != nil {
+			return err
+		}
+		defer rc.Close()
+		f, err := os.Create(dest)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		_, err = io.Copy(f, rc)
+		return err
+	}
+	return downloadFile(ctx, store, key, dest)
 }
 
 // ── ListRemote ────────────────────────────────────────────────────────────────
