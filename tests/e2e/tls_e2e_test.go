@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,19 +17,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
-func httpClientWithTLS(cfg *tls.Config) *http.Client {
-	return &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: cfg.Clone(),
-		},
+func tlsTransport(cfg *tls.Config) *http.Transport {
+	return &http.Transport{
+		TLSClientConfig: cfg.Clone(),
 	}
 }
 
@@ -344,11 +340,11 @@ func waitForMinIO(ctx context.Context, endpoint, caPath string) error {
 		return err
 	}
 	for time.Now().Before(deadline) {
-		client, err := tlsAWSClient(ctx, endpoint, cfg)
+		client, err := tlsMinioClient(endpoint, cfg)
 		if err != nil {
 			return err
 		}
-		_, listErr := client.ListBuckets(ctx, &s3.ListBucketsInput{})
+		_, listErr := client.ListBuckets(ctx)
 		if listErr == nil {
 			return nil
 		}
@@ -366,12 +362,15 @@ func ensureBucketTLS(ctx context.Context, bucket, endpoint, caPath string) error
 	if err != nil {
 		return err
 	}
-	client, err := tlsAWSClient(ctx, endpoint, cfg)
+	client, err := tlsMinioClient(endpoint, cfg)
 	if err != nil {
 		return err
 	}
-	if _, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
+	if err := client.MakeBucket(ctx, bucket, minio.MakeBucketOptions{Region: "us-east-1"}); err != nil {
 		// Already-exists is fine.
+		if exists, headErr := client.BucketExists(ctx, bucket); headErr == nil && exists {
+			return nil
+		}
 		if !strings.Contains(err.Error(), "BucketAlready") {
 			return fmt.Errorf("create bucket: %w", err)
 		}
@@ -379,17 +378,21 @@ func ensureBucketTLS(ctx context.Context, bucket, endpoint, caPath string) error
 	return nil
 }
 
-func tlsAWSClient(ctx context.Context, endpoint string, tlsCfg *tls.Config) (*s3.Client, error) {
-	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
-		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("minioadmin", "minioadmin", "")),
-		awsconfig.WithRegion("us-east-1"),
-		awsconfig.WithBaseEndpoint(endpoint),
-		awsconfig.WithHTTPClient(httpClientWithTLS(tlsCfg)),
-	)
+func tlsMinioClient(endpoint string, tlsCfg *tls.Config) (*minio.Client, error) {
+	u, err := url.Parse(endpoint)
 	if err != nil {
-		return nil, fmt.Errorf("load aws config: %w", err)
+		return nil, fmt.Errorf("parse endpoint %q: %w", endpoint, err)
 	}
-	return s3.NewFromConfig(awsCfg, func(o *s3.Options) { o.UsePathStyle = true }), nil
+	host := u.Host
+	if host == "" {
+		host = endpoint
+	}
+	return minio.New(host, &minio.Options{
+		Creds:     credentials.NewStaticV4("minioadmin", "minioadmin", ""),
+		Secure:    u.Scheme == "https",
+		Region:    "us-east-1",
+		Transport: tlsTransport(tlsCfg),
+	})
 }
 
 func tlsClientConfig(caPath, clientCert, clientKey string) (*tls.Config, error) {

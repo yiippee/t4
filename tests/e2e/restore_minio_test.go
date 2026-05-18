@@ -1,51 +1,34 @@
-package cli
+package e2e_test
 
 import (
 	"bytes"
 	"context"
 	"fmt"
-	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/johannesboyne/gofakes3"
-	"github.com/johannesboyne/gofakes3/backend/s3mem"
-
 	"github.com/t4db/t4"
 	"github.com/t4db/t4/internal/checkpoint"
+	"github.com/t4db/t4/internal/cli"
 	"github.com/t4db/t4/pkg/object"
 )
 
-const (
-	restoreTestBucket    = "t4-cli-restore"
-	restoreTestAccessKey = "access"
-	restoreTestSecretKey = "secret"
-)
-
+// TestRestoreCheckpointFromS3Smoke exercises the `t4 restore checkpoint`
+// command against a real MinIO bucket. The test seeds the bucket by running
+// an in-process source node, then invokes the CLI restore command.
 func TestRestoreCheckpointFromS3Smoke(t *testing.T) {
-	ctx := context.Background()
-	endpoint := newRestoreFakeS3(t, ctx)
-	prefix := "smoke"
-
-	store, err := object.NewS3StoreFromConfig(ctx, object.S3Config{
-		Bucket:          restoreTestBucket,
-		Prefix:          prefix,
-		Endpoint:        endpoint,
-		AccessKeyID:     restoreTestAccessKey,
-		SecretAccessKey: restoreTestSecretKey,
-	})
-	if err != nil {
-		t.Fatalf("new source S3 store: %v", err)
+	if os.Getenv("T4_E2E_MINIO") == "" {
+		t.Skip("set T4_E2E_MINIO=1 to run the MinIO-backed restore smoke test")
 	}
+
+	ctx := context.Background()
+	o := newObjectStoreTest(t, ctx, fmt.Sprintf("smoke-%d", time.Now().UnixNano()), false)
 
 	source, err := t4.Open(t4.Config{
 		DataDir:            t.TempDir(),
-		ObjectStore:        store,
+		ObjectStore:        o.store,
 		CheckpointInterval: 25 * time.Millisecond,
 		CheckpointEntries:  1,
 		SegmentMaxAge:      25 * time.Millisecond,
@@ -61,16 +44,18 @@ func TestRestoreCheckpointFromS3Smoke(t *testing.T) {
 			t.Fatalf("put source key %d: %v", i, err)
 		}
 	}
-	waitForCheckpointAtLeast(t, ctx, store, lastRev)
+	waitForCheckpointAtLeast(t, ctx, o.store, lastRev)
 	if err := source.Close(); err != nil {
 		t.Fatalf("close source node: %v", err)
 	}
 
+	args := restoreS3CLIArgs(o)
+
 	listOut := &bytes.Buffer{}
-	listCmd := NewRootCmd()
+	listCmd := cli.NewRootCmd()
 	listCmd.SetOut(listOut)
 	listCmd.SetErr(listOut)
-	listCmd.SetArgs(append([]string{"restore", "list"}, restoreS3Args(endpoint, prefix)...))
+	listCmd.SetArgs(append([]string{"restore", "list"}, args...))
 	if err := listCmd.Execute(); err != nil {
 		t.Fatalf("restore list: %v\noutput:\n%s", err, listOut.String())
 	}
@@ -80,10 +65,10 @@ func TestRestoreCheckpointFromS3Smoke(t *testing.T) {
 
 	restoreDir := t.TempDir()
 	restoreOut := &bytes.Buffer{}
-	restoreCmd := NewRootCmd()
+	restoreCmd := cli.NewRootCmd()
 	restoreCmd.SetOut(restoreOut)
 	restoreCmd.SetErr(restoreOut)
-	restoreCmd.SetArgs(append([]string{"restore", "checkpoint", "--data-dir", restoreDir}, restoreS3Args(endpoint, prefix)...))
+	restoreCmd.SetArgs(append([]string{"restore", "checkpoint", "--data-dir", restoreDir}, args...))
 	if err := restoreCmd.Execute(); err != nil {
 		t.Fatalf("restore checkpoint: %v\noutput:\n%s", err, restoreOut.String())
 	}
@@ -92,7 +77,7 @@ func TestRestoreCheckpointFromS3Smoke(t *testing.T) {
 	}
 
 	countOut := &bytes.Buffer{}
-	countCmd := NewRootCmd()
+	countCmd := cli.NewRootCmd()
 	countCmd.SetOut(countOut)
 	countCmd.SetErr(countOut)
 	countCmd.SetArgs([]string{"inspect", "count", "--data-dir", restoreDir, "--prefix", "/restore/"})
@@ -104,45 +89,19 @@ func TestRestoreCheckpointFromS3Smoke(t *testing.T) {
 	}
 }
 
-func newRestoreFakeS3(t *testing.T, ctx context.Context) string {
-	t.Helper()
-
-	faker := gofakes3.New(s3mem.New())
-	server := httptest.NewServer(faker.Server())
-	t.Cleanup(server.Close)
-
-	cfg, err := awsconfig.LoadDefaultConfig(ctx,
-		awsconfig.WithCredentialsProvider(
-			credentials.NewStaticCredentialsProvider(restoreTestAccessKey, restoreTestSecretKey, ""),
-		),
-		awsconfig.WithRegion("us-east-1"),
-		awsconfig.WithBaseEndpoint(server.URL),
-	)
-	if err != nil {
-		t.Fatalf("aws config: %v", err)
-	}
-	client := s3.NewFromConfig(cfg, func(o *s3.Options) { o.UsePathStyle = true })
-	if _, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
-		Bucket: aws.String(restoreTestBucket),
-	}); err != nil {
-		t.Fatalf("create bucket: %v", err)
-	}
-	return server.URL
-}
-
-func restoreS3Args(endpoint, prefix string) []string {
+func restoreS3CLIArgs(o *objectStoreConfig) []string {
 	return []string{
-		"--s3-bucket", restoreTestBucket,
-		"--s3-prefix", prefix,
-		"--s3-endpoint", endpoint,
-		"--s3-access-key-id", restoreTestAccessKey,
-		"--s3-secret-access-key", restoreTestSecretKey,
+		"--s3-bucket", o.bucket,
+		"--s3-prefix", o.prefix,
+		"--s3-endpoint", o.cfg.endpoint,
+		"--s3-region", o.cfg.region,
+		"--s3-access-key-id", o.cfg.access,
+		"--s3-secret-access-key", o.cfg.secret,
 	}
 }
 
 func waitForCheckpointAtLeast(t *testing.T, ctx context.Context, store object.Store, minRevision int64) {
 	t.Helper()
-
 	cp := checkpoint.New(nil)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
