@@ -12,10 +12,12 @@
 
   :jvm-opts
   ["-Djava.awt.headless=true"
-   ;; Leave headroom for Docker, MinIO, and five DB containers on GitHub's
-   ;; ubuntu-latest runners. The CI workload is intentionally small (~60 ops),
-   ;; so a 2 GB checker heap is enough without risking host-level OOM kills.
-   "-Xmx2g"
+   ;; Knossos linearizability search on the register workload under
+   ;; partition-halves can balloon: concurrent ops in both partition halves
+   ;; produce histories whose interleaving space is exponential. 2 GB OOM'd
+   ;; in CI; 6 GB leaves room for Docker + MinIO + 5 DB containers on
+   ;; ubuntu-latest (16 GB).
+   "-Xmx6g"
    ;; jetcd uses Netty which reflectively accesses JDK internals on Java 17+.
    "--add-opens=java.base/java.lang=ALL-UNNAMED"
    "--add-opens=java.base/java.nio=ALL-UNNAMED"

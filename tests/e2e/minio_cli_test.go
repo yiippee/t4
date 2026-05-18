@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -17,11 +18,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-	smithyhttp "github.com/aws/smithy-go/transport/http"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
@@ -207,11 +205,8 @@ func TestMinIOCLISmoke(t *testing.T) {
 
 // s3KeyExists reports whether the object at the prefix-relative key exists in
 // the test bucket. Returns false (no error) when the object is absent.
-func s3KeyExists(ctx context.Context, client *s3.Client, cfg minioConfig, relKey string) (bool, error) {
-	_, err := client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(cfg.bucket),
-		Key:    aws.String(prefixedKey(cfg, relKey)),
-	})
+func s3KeyExists(ctx context.Context, client *minio.Client, cfg minioConfig, relKey string) (bool, error) {
+	_, err := client.StatObject(ctx, cfg.bucket, prefixedKey(cfg, relKey), minio.StatObjectOptions{})
 	if err == nil {
 		return true, nil
 	}
@@ -222,21 +217,18 @@ func s3KeyExists(ctx context.Context, client *s3.Client, cfg minioConfig, relKey
 }
 
 // s3GetObject downloads and returns the body of a prefix-relative object key.
-func s3GetObject(ctx context.Context, client *s3.Client, cfg minioConfig, relKey string) ([]byte, error) {
-	resp, err := client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(cfg.bucket),
-		Key:    aws.String(prefixedKey(cfg, relKey)),
-	})
+func s3GetObject(ctx context.Context, client *minio.Client, cfg minioConfig, relKey string) ([]byte, error) {
+	obj, err := client.GetObject(ctx, cfg.bucket, prefixedKey(cfg, relKey), minio.GetObjectOptions{})
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = resp.Body.Close() }()
-	return io.ReadAll(resp.Body)
+	defer func() { _ = obj.Close() }()
+	return io.ReadAll(obj)
 }
 
 // checkpointSSTs reads the checkpoint manifest at relKey and returns the union
 // of its own_store and ancestor_store SST keys (prefix-relative).
-func checkpointSSTs(ctx context.Context, client *s3.Client, cfg minioConfig, relKey string) ([]string, error) {
+func checkpointSSTs(ctx context.Context, client *minio.Client, cfg minioConfig, relKey string) ([]string, error) {
 	body, err := s3GetObject(ctx, client, cfg, relKey)
 	if err != nil {
 		return nil, err
@@ -256,7 +248,7 @@ func checkpointSSTs(ctx context.Context, client *s3.Client, cfg minioConfig, rel
 
 // latestCheckpointSSTs returns the SST keys referenced by the current
 // manifest/latest pointer's checkpoint.
-func latestCheckpointSSTs(ctx context.Context, client *s3.Client, cfg minioConfig) ([]string, error) {
+func latestCheckpointSSTs(ctx context.Context, client *minio.Client, cfg minioConfig) ([]string, error) {
 	body, err := s3GetObject(ctx, client, cfg, "manifest/latest")
 	if err != nil {
 		return nil, err
@@ -281,11 +273,8 @@ func prefixedKey(cfg minioConfig, relKey string) string {
 }
 
 func isS3NotFound(err error) bool {
-	var apiErr *smithyhttp.ResponseError
-	if errors.As(err, &apiErr) {
-		return apiErr.HTTPStatusCode() == 404
-	}
-	return false
+	resp := minio.ToErrorResponse(err)
+	return resp.StatusCode == 404 || resp.Code == "NoSuchKey"
 }
 
 func buildT4(t *testing.T, ctx context.Context, workDir string) string {
@@ -310,11 +299,11 @@ func ensureBucket(ctx context.Context, cfg minioConfig) error {
 	deadline := time.Now().Add(30 * time.Second)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		_, err = client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(cfg.bucket)})
+		err = client.MakeBucket(ctx, cfg.bucket, minio.MakeBucketOptions{Region: cfg.region})
 		if err == nil {
 			return nil
 		}
-		if _, headErr := client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(cfg.bucket)}); headErr == nil {
+		if exists, headErr := client.BucketExists(ctx, cfg.bucket); headErr == nil && exists {
 			return nil
 		}
 		lastErr = err
@@ -323,16 +312,21 @@ func ensureBucket(ctx context.Context, cfg minioConfig) error {
 	return fmt.Errorf("create bucket %q: %w", cfg.bucket, lastErr)
 }
 
-func s3Client(ctx context.Context, cfg minioConfig) (*s3.Client, error) {
-	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
-		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(cfg.access, cfg.secret, "")),
-		awsconfig.WithRegion(cfg.region),
-		awsconfig.WithBaseEndpoint(cfg.endpoint),
-	)
+func s3Client(ctx context.Context, cfg minioConfig) (*minio.Client, error) {
+	_ = ctx
+	u, err := url.Parse(cfg.endpoint)
 	if err != nil {
-		return nil, fmt.Errorf("load aws config: %w", err)
+		return nil, fmt.Errorf("parse endpoint %q: %w", cfg.endpoint, err)
 	}
-	return s3.NewFromConfig(awsCfg, func(o *s3.Options) { o.UsePathStyle = true }), nil
+	host := u.Host
+	if host == "" {
+		host = cfg.endpoint
+	}
+	return minio.New(host, &minio.Options{
+		Creds:  credentials.NewStaticV4(cfg.access, cfg.secret, ""),
+		Secure: u.Scheme == "https",
+		Region: cfg.region,
+	})
 }
 
 func startNode(t *testing.T, ctx context.Context, cfg minioConfig, dataDir, listenAddr string) (*exec.Cmd, *bytes.Buffer) {
