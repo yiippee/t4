@@ -54,6 +54,8 @@ func (n *Node) preparePut(key string, value []byte, lease int64) (wal.Entry, err
 	}
 	n.nextRev++
 	newRev := n.nextRev
+	n.nextSeq++
+	seq := n.nextSeq
 	var op wal.Op
 	var createRev, prevRev int64
 	if existing == nil {
@@ -70,7 +72,7 @@ func (n *Node) preparePut(key string, value []byte, lease int64) (wal.Entry, err
 		},
 	}
 	return wal.Entry{
-		Revision: newRev, Term: n.term, Op: op,
+		ID: seq, Revision: newRev, Term: n.term, Op: op,
 		Key: key, Value: value, Lease: lease,
 		CreateRevision: createRev, PrevRevision: prevRev,
 	}, nil
@@ -104,6 +106,8 @@ func (n *Node) Create(ctx context.Context, key string, value []byte, lease int64
 	}
 	n.nextRev++
 	newRev := n.nextRev
+	n.nextSeq++
+	seq := n.nextSeq
 	n.pending[key] = pendingKV{
 		rev: newRev,
 		kv: &istore.KeyValue{
@@ -112,7 +116,7 @@ func (n *Node) Create(ctx context.Context, key string, value []byte, lease int64
 		},
 	}
 	e := wal.Entry{
-		Revision: newRev, Term: n.term, Op: wal.OpCreate,
+		ID: seq, Revision: newRev, Term: n.term, Op: wal.OpCreate,
 		Key: key, Value: value, Lease: lease, CreateRevision: newRev,
 	}
 	req := newWriteReq(ctx, e)
@@ -150,6 +154,8 @@ func (n *Node) Update(ctx context.Context, key string, value []byte, revision, l
 	}
 	n.nextRev++
 	newRev := n.nextRev
+	n.nextSeq++
+	seq := n.nextSeq
 	n.pending[key] = pendingKV{
 		rev: newRev,
 		kv: &istore.KeyValue{
@@ -159,7 +165,7 @@ func (n *Node) Update(ctx context.Context, key string, value []byte, revision, l
 		},
 	}
 	e := wal.Entry{
-		Revision: newRev, Term: n.term, Op: wal.OpUpdate,
+		ID: seq, Revision: newRev, Term: n.term, Op: wal.OpUpdate,
 		Key: key, Value: value, Lease: lease,
 		CreateRevision: existing.CreateRevision, PrevRevision: existing.Revision,
 	}
@@ -258,9 +264,11 @@ func (n *Node) prepareDelete(key string) (wal.Entry, error) {
 	}
 	n.nextRev++
 	newRev := n.nextRev
+	n.nextSeq++
+	seq := n.nextSeq
 	n.pending[key] = pendingKV{rev: newRev, deleted: true}
 	return wal.Entry{
-		Revision: newRev, Term: n.term, Op: wal.OpDelete,
+		ID: seq, Revision: newRev, Term: n.term, Op: wal.OpDelete,
 		Key: key, CreateRevision: existing.CreateRevision, PrevRevision: existing.Revision,
 	}, nil
 }
@@ -577,6 +585,8 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 
 	n.nextRev++
 	newRev := n.nextRev
+	n.nextSeq++
+	seq := n.nextSeq
 
 	var deletedKeys map[string]struct{}
 	subOps := make([]wal.TxnSubOp, len(active))
@@ -608,6 +618,7 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 	}
 
 	return wal.Entry{
+		ID:       seq,
 		Revision: newRev,
 		Term:     n.term,
 		Op:       wal.OpTxn,
@@ -727,9 +738,10 @@ func (n *Node) Compact(ctx context.Context, revision int64) error {
 		n.mu.Unlock()
 		return ErrClosed
 	}
-	n.nextRev++
+	n.nextSeq++
+	seq := n.nextSeq
 	e := wal.Entry{
-		Revision: n.nextRev, Term: n.term, Op: wal.OpCompact,
+		ID: seq, Revision: n.nextRev, Term: n.term, Op: wal.OpCompact,
 		PrevRevision: revision,
 	}
 	req := newWriteReq(ctx, e)

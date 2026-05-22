@@ -65,7 +65,13 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 		wal.WithSegmentMaxAge(n.cfg.SegmentMaxAge),
 		wal.WithLogger(n.log),
 	)
-	if err := w2.Open(walDir, rec.Term, n.db.Load().CurrentRevision()+1); err != nil {
+	nextSeq := n.db.Load().CurrentRevision()
+	if maxSeq, merr := wal.MaxSequence(walDir); merr == nil && maxSeq > nextSeq {
+		nextSeq = maxSeq
+	} else if merr != nil {
+		n.log.Warnf("t4: scan local WAL sequence before leadership: %v", merr)
+	}
+	if err := w2.Open(walDir, rec.Term, nextSeq+1); err != nil {
 		return fmt.Errorf("t4: open WAL as leader: %w", err)
 	}
 	w2.Start(bgCtx)
@@ -93,6 +99,7 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	n.leaderCli.Store(nil) // leader does not forward writes
 	n.storeRole(roleLeader)
 	n.nextRev = n.db.Load().CurrentRevision() // sync revision counter after any replay
+	n.nextSeq = nextSeq
 	n.pending = make(map[string]pendingKV)
 	n.mu.Unlock()
 
@@ -460,8 +467,8 @@ func (n *Node) commitLoop(ctx context.Context) {
 				n.peerSrv.Broadcast(&req.entry)
 			}
 
-			startRev := batch[0].entry.Revision
-			maxRev := batch[len(batch)-1].entry.Revision
+			startRev := batch[0].entry.Sequence()
+			maxRev := batch[len(batch)-1].entry.Sequence()
 			err = <-walErrC
 			if err == nil {
 				n.peerSrv.BroadcastCommit(startRev, maxRev)

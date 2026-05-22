@@ -172,6 +172,11 @@ type Node struct {
 	// on the write path so that in-flight entries have distinct revisions.
 	nextRev int64
 
+	// nextSeq is the last WAL/peer-stream identity assigned to any entry.
+	// Unlike nextRev, metadata-only entries such as Compact consume a sequence
+	// number without consuming a user-visible revision.
+	nextSeq int64
+
 	// pending holds in-flight writes that have been assigned a revision but
 	// not yet applied to Pebble. Protected by mu.
 	pending map[string]pendingKV
@@ -392,7 +397,13 @@ func Open(cfg Config) (*Node, error) {
 	if w == nil {
 		w = wal.New(opts...)
 	}
-	if err := w.Open(walDir, term, startRev+1); err != nil {
+	nextSeq := startRev
+	if maxSeq, merr := wal.MaxSequence(walDir); merr == nil && maxSeq > nextSeq {
+		nextSeq = maxSeq
+	} else if merr != nil {
+		log.Warnf("t4: scan local WAL sequence: %v", merr)
+	}
+	if err := w.Open(walDir, term, nextSeq+1); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("t4: open wal: %w", err)
 	}
@@ -519,11 +530,17 @@ func Open(cfg Config) (*Node, error) {
 				}
 			}
 			w.Close()
-			if rerr := w.Open(walDir, newTerm, freshDB.CurrentRevision()+1); rerr != nil {
+			reopenSeq := freshDB.CurrentRevision()
+			if maxSeq, merr := wal.MaxSequence(walDir); merr == nil && maxSeq > reopenSeq {
+				reopenSeq = maxSeq
+			} else if merr != nil {
+				log.Warnf("t4: scan local WAL sequence after GC-gap fix: %v", merr)
+			}
+			if rerr := w.Open(walDir, newTerm, reopenSeq+1); rerr != nil {
 				freshDB.Close()
 				return nil, fmt.Errorf("t4: reopen wal after GC-gap fix: %w", rerr)
 			}
-			db, term, startRev = freshDB, newTerm, freshDB.CurrentRevision()
+			db, term, startRev, nextSeq = freshDB, newTerm, freshDB.CurrentRevision(), reopenSeq
 			log.Infof("t4: checkpoint refreshed to rev=%d (term=%d)", startRev, term)
 		}
 	}
@@ -536,6 +553,7 @@ func Open(cfg Config) (*Node, error) {
 		bgCtx:       bgCtx,
 		cancelBg:    bgCancel,
 		nextRev:     db.CurrentRevision(),
+		nextSeq:     nextSeq,
 		pending:     make(map[string]pendingKV),
 		writeC:      make(chan *writeReq, 1024),
 		sstUploader: sstUp,

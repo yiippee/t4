@@ -29,7 +29,7 @@ func (n *Node) followLoop(bgCtx context.Context) {
 				// stream skips (or rewinds) a revision, force a full resync rather
 				// than silently advancing currentRev with holes.
 				for i, e := range entries {
-					if e.Revision != fromRev+int64(i) {
+					if e.Sequence() != fromRev+int64(i) {
 						return peer.ErrResyncRequired
 					}
 				}
@@ -60,7 +60,7 @@ func (n *Node) followLoop(bgCtx context.Context) {
 				}
 				// Advance only after a successful apply so a reconnect retries
 				// from the start of the failed batch rather than skipping it.
-				fromRev = entries[len(entries)-1].Revision + 1
+				fromRev = entries[len(entries)-1].Sequence() + 1
 				return nil
 			},
 		)

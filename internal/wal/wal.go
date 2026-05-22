@@ -109,6 +109,34 @@ func Open(dir string, term uint64, startRev int64, opts ...Option) (*WAL, error)
 	return w, nil
 }
 
+// MaxSequence returns the highest WAL sequence found in local segment files.
+// It is used before opening a new writer so metadata-only entries that do not
+// advance the user revision still keep the next segment from reusing their ID.
+func MaxSequence(dir string) (int64, error) {
+	paths, err := LocalSegments(dir)
+	if err != nil {
+		return 0, err
+	}
+	var maxSeq int64
+	for _, path := range paths {
+		sr, closer, err := OpenSegmentFile(path)
+		if err != nil {
+			return maxSeq, err
+		}
+		entries, readErr := sr.ReadAll()
+		closer()
+		for _, e := range entries {
+			if seq := e.Sequence(); seq > maxSeq {
+				maxSeq = seq
+			}
+		}
+		if readErr != nil {
+			return maxSeq, readErr
+		}
+	}
+	return maxSeq, nil
+}
+
 // Open opens (or creates) the WAL directory and prepares the active segment.
 // Callers must call Start to begin background processing.
 func (w *WAL) Open(dir string, term uint64, startRev int64) error {
@@ -148,7 +176,7 @@ func (w *WAL) ReplayLocal(db RecoveryStore, afterRev int64) error {
 		}
 		var applicable []Entry
 		for _, e := range entries {
-			if e.Revision > afterRev {
+			if e.Sequence() > afterRev {
 				applicable = append(applicable, *e)
 			}
 		}

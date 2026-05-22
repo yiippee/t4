@@ -209,9 +209,6 @@ func (s *Store) Apply(entries []wal.Entry) error {
 				b.Close()
 				return err
 			}
-			if e.Revision > maxRev {
-				maxRev = e.Revision
-			}
 			continue
 		}
 		if err := s.applyEntry(b, e); err != nil {
@@ -232,7 +229,9 @@ func (s *Store) Apply(entries []wal.Entry) error {
 		b.Close()
 		return fmt.Errorf("store: commit batch: %w", err)
 	}
-	atomic.StoreInt64(&s.currentRev, maxRev)
+	if maxRev > 0 {
+		atomic.StoreInt64(&s.currentRev, maxRev)
+	}
 	s.broadcast()
 	return nil
 }
@@ -292,7 +291,7 @@ func (s *Store) Recover(entries []wal.Entry) error {
 				return err
 			}
 		}
-		if e.Revision > maxRev {
+		if e.Op != wal.OpCompact && e.Revision > maxRev {
 			maxRev = e.Revision
 		}
 	}

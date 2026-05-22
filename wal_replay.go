@@ -197,10 +197,10 @@ func replayRemote(ctx context.Context, db *istore.Store, obj object.Store, after
 			log.Warnf("t4: partial remote segment %q: %v", key, readErr)
 		}
 		for _, e := range entries {
-			if e.Revision <= afterRev {
+			if e.Sequence() <= afterRev {
 				continue // already covered by checkpoint / local WAL
 			}
-			if e.Revision >= termCutoff {
+			if e.Sequence() >= termCutoff {
 				continue // superseded by a higher-term entry at this revision
 			}
 			all = append(all, *e)
@@ -214,14 +214,14 @@ func replayRemote(ctx context.Context, db *istore.Store, obj object.Store, after
 	// Ensure deterministic order and resolve same-revision duplicates by
 	// keeping the highest-term entry at each revision.
 	sort.Slice(all, func(i, j int) bool {
-		if all[i].Revision != all[j].Revision {
-			return all[i].Revision < all[j].Revision
+		if all[i].Sequence() != all[j].Sequence() {
+			return all[i].Sequence() < all[j].Sequence()
 		}
 		return all[i].Term < all[j].Term
 	})
 	merged := make([]wal.Entry, 0, len(all))
 	for _, e := range all {
-		if n := len(merged); n > 0 && merged[n-1].Revision == e.Revision {
+		if n := len(merged); n > 0 && merged[n-1].Sequence() == e.Sequence() {
 			if e.Term >= merged[n-1].Term {
 				merged[n-1] = e
 			}
@@ -234,8 +234,8 @@ func replayRemote(ctx context.Context, db *istore.Store, obj object.Store, after
 	// during bootstrap/resync and must restore from a fresher checkpoint.
 	expected := afterRev + 1
 	for _, e := range merged {
-		if e.Revision != expected {
-			return fmt.Errorf("replayRemote: missing revision(s): expected %d got %d", expected, e.Revision)
+		if e.Sequence() != expected {
+			return fmt.Errorf("replayRemote: missing sequence(s): expected %d got %d", expected, e.Sequence())
 		}
 		expected++
 	}

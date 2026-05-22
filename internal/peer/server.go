@@ -128,7 +128,7 @@ func (s *Server) Broadcast(e *wal.Entry) {
 			// reconnects from its last applied revision, re-fetching the gap
 			// from the ring buffer. Silently dropping the entry and continuing
 			// would leave the follower with a permanent hole.
-			s.log.Warnf("peer: follower %q too slow — disconnecting to force resync at rev=%d", id, e.Revision)
+			s.log.Warnf("peer: follower %q too slow — disconnecting to force resync at seq=%d", id, e.Sequence())
 			toKick = append(toKick, id)
 		}
 	}
@@ -147,13 +147,13 @@ func (s *Server) BroadcastCommit(startRev, rev int64) {
 	keep := s.pending[:0]
 	for _, e := range s.pending {
 		switch {
-		case e.Revision < startRev:
+		case e.Sequence() < startRev:
 			// An older uncommitted entry was superseded by a later committed
 			// range. Drop it so reconnect snapshots never replay aborted writes.
-		case e.Revision <= rev:
+		case e.Sequence() <= rev:
 			s.buf.push(e)
-			if e.Revision > s.maxBroadcastRev {
-				s.maxBroadcastRev = e.Revision
+			if e.Sequence() > s.maxBroadcastRev {
+				s.maxBroadcastRev = e.Sequence()
 			}
 		default:
 			keep = append(keep, e)
@@ -304,7 +304,7 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 	s.followers[req.NodeID] = ch
 	var maxSent int64
 	if len(snapshot) > 0 {
-		maxSent = snapshot[len(snapshot)-1].Revision
+		maxSent = snapshot[len(snapshot)-1].Sequence()
 	} else {
 		maxSent = req.FromRevision - 1
 	}
@@ -378,8 +378,8 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 	if len(snapshot) > 0 {
 		if err := stream.Send(&WalEntryMsg{
 			Commit:              true,
-			CommitStartRevision: snapshot[0].Revision,
-			CommitRevision:      snapshot[len(snapshot)-1].Revision,
+			CommitStartRevision: snapshot[0].Sequence(),
+			CommitRevision:      snapshot[len(snapshot)-1].Sequence(),
 		}); err != nil {
 			return err
 		}
@@ -394,11 +394,11 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 				// re-fetches the missed entries from the ring buffer.
 				return fmt.Errorf("follower stream closed: too slow, reconnect required")
 			}
-			if !msg.Commit && msg.Revision <= maxSent {
+			if !msg.Commit && msg.ID <= maxSent {
 				continue
 			}
 			if !msg.Commit {
-				maxSent = msg.Revision
+				maxSent = msg.ID
 			}
 			if err := stream.Send(msg); err != nil {
 				return err
@@ -472,12 +472,12 @@ func (b *entryBuffer) since(fromRev int64) ([]*wal.Entry, bool) {
 	if len(b.entries) == 0 {
 		return nil, true
 	}
-	minRev := b.entries[0].Revision
+	minRev := b.entries[0].Sequence()
 	if fromRev < minRev {
 		return nil, false
 	}
 	for i, e := range b.entries {
-		if e.Revision >= fromRev {
+		if e.Sequence() >= fromRev {
 			out := make([]*wal.Entry, len(b.entries)-i)
 			copy(out, b.entries[i:])
 			return out, true

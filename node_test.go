@@ -343,11 +343,61 @@ func TestNodeCompact(t *testing.T) {
 	if n.CompactRevision() != 2 {
 		t.Errorf("CompactRevision: want 2 got %d", n.CompactRevision())
 	}
+	if n.CurrentRevision() != 3 {
+		t.Errorf("CurrentRevision after compact: want 3 got %d", n.CurrentRevision())
+	}
+	rev, err := n.Put(c, "k", []byte("v4"), 0)
+	if err != nil {
+		t.Fatalf("Put after compact: %v", err)
+	}
+	if rev != 4 {
+		t.Errorf("Put after compact revision: want 4 got %d", rev)
+	}
 
 	// Current value still accessible.
 	kv, _ := n.Get("k")
-	if string(kv.Value) != "v3" {
-		t.Errorf("current value: want v3 got %q", kv.Value)
+	if string(kv.Value) != "v4" {
+		t.Errorf("current value: want v4 got %q", kv.Value)
+	}
+}
+
+func TestNodeCompactDoesNotReuseWALSequenceAfterRestart(t *testing.T) {
+	dir := t.TempDir()
+	c := ctx(t)
+	n, err := t4.Open(t4.Config{
+		DataDir:     dir,
+		ObjectStore: object.NewMem(),
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := n.Put(c, "k", []byte("v1"), 0); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := n.Compact(c, 1); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if n.CurrentRevision() != 1 {
+		t.Fatalf("CurrentRevision after compact: want 1 got %d", n.CurrentRevision())
+	}
+	if err := n.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	n, err = t4.Open(t4.Config{
+		DataDir:     dir,
+		ObjectStore: object.NewMem(),
+	})
+	if err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	t.Cleanup(func() { n.Close() })
+	rev, err := n.Put(c, "k", []byte("v2"), 0)
+	if err != nil {
+		t.Fatalf("Put after reopen: %v", err)
+	}
+	if rev != 2 {
+		t.Fatalf("Put after reopen revision: want 2 got %d", rev)
 	}
 }
 

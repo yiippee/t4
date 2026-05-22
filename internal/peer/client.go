@@ -221,7 +221,7 @@ func (c *Client) followOnce(ctx context.Context, fromRev int64, walFn func([]wal
 				continue
 			}
 			drop := 0
-			for drop < len(staged) && staged[drop].Revision < startRev {
+			for drop < len(staged) && staged[drop].Sequence() < startRev {
 				drop++
 			}
 			if drop > 0 {
@@ -229,29 +229,29 @@ func (c *Client) followOnce(ctx context.Context, fromRev int64, walFn func([]wal
 			}
 
 			cut := 0
-			for cut < len(staged) && staged[cut].Revision <= msg.CommitRevision {
+			for cut < len(staged) && staged[cut].Sequence() <= msg.CommitRevision {
 				cut++
 			}
-			if cut == 0 || staged[0].Revision != startRev || staged[cut-1].Revision != msg.CommitRevision {
+			if cut == 0 || staged[0].Sequence() != startRev || staged[cut-1].Sequence() != msg.CommitRevision {
 				return fromRev, ErrResyncRequired
 			}
 			batch := staged[:cut]
 			batchStartRev := startRev
-			if batch[0].Revision != batchStartRev {
+			if batch[0].Sequence() != batchStartRev {
 				return fromRev, ErrResyncRequired
 			}
 			for i, e := range batch {
-				if e.Revision != batchStartRev+int64(i) {
+				if e.Sequence() != batchStartRev+int64(i) {
 					return fromRev, ErrResyncRequired
 				}
 			}
 			if err := walFn(batch); err != nil {
 				return batchStartRev, err
 			}
-			if batch[len(batch)-1].Revision+1 > fromRev {
-				fromRev = batch[len(batch)-1].Revision + 1
+			if batch[len(batch)-1].Sequence()+1 > fromRev {
+				fromRev = batch[len(batch)-1].Sequence() + 1
 			}
-			if err := stream.SendAck(batch[len(batch)-1].Revision); err != nil {
+			if err := stream.SendAck(batch[len(batch)-1].Sequence()); err != nil {
 				return fromRev, err
 			}
 			if err := applyFn(batch); err != nil {

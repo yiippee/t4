@@ -278,8 +278,8 @@ func TestCompact(t *testing.T) {
 	if s.CompactRevision() != 2 {
 		t.Errorf("CompactRevision: want 2 got %d", s.CompactRevision())
 	}
-	if s.CurrentRevision() != 4 {
-		t.Errorf("CurrentRevision after compact: want 4 got %d", s.CurrentRevision())
+	if s.CurrentRevision() != 3 {
+		t.Errorf("CurrentRevision after compact: want 3 got %d", s.CurrentRevision())
 	}
 
 	// The current value should still be accessible.
