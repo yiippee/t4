@@ -77,6 +77,7 @@ type Manifest struct {
 	FormatVersion uint32 `json:"format_version,omitempty"`
 	CheckpointKey string `json:"checkpoint_key"`
 	Revision      int64  `json:"revision"`
+	LastSequence  int64  `json:"last_sequence,omitempty"`
 	Term          uint64 `json:"term"`
 	// LastWALKey is the object key of the last fully uploaded WAL segment
 	// whose last entry has revision <= Revision. Used to bound WAL replay.
@@ -92,6 +93,7 @@ type CheckpointIndex struct {
 	FormatVersion uint32 `json:"format_version,omitempty"`
 	Term          uint64 `json:"term"`
 	Revision      int64  `json:"revision"`
+	LastSequence  int64  `json:"last_sequence,omitempty"`
 	// SSTFiles are full object keys ("sst/{hash16}/{name}") of SST files
 	// stored in this store.
 	SSTFiles []string `json:"sst_files"`
@@ -154,6 +156,9 @@ func (m *Manager) ReadManifest(ctx context.Context, store object.Store) (*Manife
 		return nil, fmt.Errorf("checkpoint: manifest format_version=%d is newer than supported format_version=%d",
 			manifest.FormatVersion, CheckpointFormatVersion)
 	}
+	if manifest.LastSequence == 0 {
+		manifest.LastSequence = manifest.Revision
+	}
 	return &manifest, nil
 }
 
@@ -182,6 +187,12 @@ func (mgr *Manager) WriteManifest(ctx context.Context, store object.Store, m *Ma
 // LIST request, keeping the per-checkpoint S3 cost to O(1) GETs regardless of
 // how many SST files have accumulated in the bucket.
 func (mgr *Manager) Write(ctx context.Context, db *pebble.DB, store object.Store, term uint64, revision int64, lastWALKey string, ancestorStore object.Store) error {
+	return mgr.WriteAtSequence(ctx, db, store, term, revision, revision, lastWALKey, ancestorStore)
+}
+
+// WriteAtSequence is like Write, but records the WAL sequence covered by the
+// checkpoint separately from the user-visible revision.
+func (mgr *Manager) WriteAtSequence(ctx context.Context, db *pebble.DB, store object.Store, term uint64, revision, sequence int64, lastWALKey string, ancestorStore object.Store) error {
 	tmpDir, err := os.MkdirTemp("", "t4-checkpoint-*")
 	if err != nil {
 		return fmt.Errorf("checkpoint: mktemp: %w", err)
@@ -248,7 +259,7 @@ func (mgr *Manager) Write(ctx context.Context, db *pebble.DB, store object.Store
 		return fmt.Errorf("checkpoint: walk: %w", err)
 	}
 
-	return mgr.writeIndex(ctx, store, term, revision, lastWALKey, sstFiles, ancestorSSTFiles, metaFiles)
+	return mgr.writeIndex(ctx, store, term, revision, sequence, lastWALKey, sstFiles, ancestorSSTFiles, metaFiles)
 }
 
 // WriteWithRegistry creates a Pebble checkpoint using a pre-built SST registry
@@ -260,6 +271,12 @@ func (mgr *Manager) Write(ctx context.Context, db *pebble.DB, store object.Store
 // inheritedRegistry maps Pebble SST filename → s3 key in the ancestor store
 // (for branch nodes); these are recorded as AncestorSSTFiles.
 func (mgr *Manager) WriteWithRegistry(ctx context.Context, db *pebble.DB, store object.Store, term uint64, revision int64, lastWALKey string, localRegistry, inheritedRegistry map[string]string) error {
+	return mgr.WriteWithRegistryAtSequence(ctx, db, store, term, revision, revision, lastWALKey, localRegistry, inheritedRegistry)
+}
+
+// WriteWithRegistryAtSequence is like WriteWithRegistry, but records the WAL
+// sequence covered by the checkpoint separately from the user-visible revision.
+func (mgr *Manager) WriteWithRegistryAtSequence(ctx context.Context, db *pebble.DB, store object.Store, term uint64, revision, sequence int64, lastWALKey string, localRegistry, inheritedRegistry map[string]string) error {
 	tmpDir, err := os.MkdirTemp("", "t4-checkpoint-*")
 	if err != nil {
 		return fmt.Errorf("checkpoint: mktemp: %w", err)
@@ -320,16 +337,17 @@ func (mgr *Manager) WriteWithRegistry(ctx context.Context, db *pebble.DB, store 
 		return fmt.Errorf("checkpoint: walk: %w", err)
 	}
 
-	return mgr.writeIndex(ctx, store, term, revision, lastWALKey, sstFiles, ancestorSSTFiles, metaFiles)
+	return mgr.writeIndex(ctx, store, term, revision, sequence, lastWALKey, sstFiles, ancestorSSTFiles, metaFiles)
 }
 
 // writeIndex writes the checkpoint index JSON and updates manifest/latest.
-func (mgr *Manager) writeIndex(ctx context.Context, store object.Store, term uint64, revision int64, lastWALKey string, sstFiles, ancestorSSTFiles, metaFiles []string) error {
+func (mgr *Manager) writeIndex(ctx context.Context, store object.Store, term uint64, revision, sequence int64, lastWALKey string, sstFiles, ancestorSSTFiles, metaFiles []string) error {
 	indexKey := CheckpointIndexKey(term, revision)
 	idx := &CheckpointIndex{
 		FormatVersion:    CheckpointFormatVersion,
 		Term:             term,
 		Revision:         revision,
+		LastSequence:     sequence,
 		SSTFiles:         sstFiles,
 		AncestorSSTFiles: ancestorSSTFiles,
 		PebbleMeta:       metaFiles,
@@ -346,6 +364,7 @@ func (mgr *Manager) writeIndex(ctx context.Context, store object.Store, term uin
 		FormatVersion: CheckpointFormatVersion,
 		CheckpointKey: indexKey,
 		Revision:      revision,
+		LastSequence:  sequence,
 		Term:          term,
 		LastWALKey:    lastWALKey,
 	}
@@ -539,6 +558,9 @@ func (mgr *Manager) ReadCheckpointIndex(ctx context.Context, store object.Store,
 			key, idx.FormatVersion, CheckpointFormatVersion)
 		return nil, fmt.Errorf("checkpoint: index %q format_version=%d is newer than supported format_version=%d",
 			key, idx.FormatVersion, CheckpointFormatVersion)
+	}
+	if idx.LastSequence == 0 {
+		idx.LastSequence = idx.Revision
 	}
 	return &idx, nil
 }

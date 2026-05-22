@@ -149,7 +149,7 @@ func (s *Store) loadMeta() error {
 	v, closer, err = s.db.Get(metaLastSeqKey)
 	if err == nil {
 		s.lastSeq = decodeRev(v)
-		closer.Close()
+		_ = closer.Close()
 	} else if err != pebble.ErrNotFound {
 		return fmt.Errorf("store: read last seq: %w", err)
 	}
@@ -233,7 +233,7 @@ func (s *Store) Apply(entries []wal.Entry) error {
 		if e.Op == wal.OpCompact {
 			// PrevRevision carries the compact target (see node.go Compact).
 			if err := s.applyCompact(b, e.PrevRevision); err != nil {
-				b.Close()
+				_ = b.Close()
 				return err
 			}
 			if seq := e.Sequence(); seq > maxSeq {
@@ -242,7 +242,7 @@ func (s *Store) Apply(entries []wal.Entry) error {
 			continue
 		}
 		if err := s.applyEntry(b, e); err != nil {
-			b.Close()
+			_ = b.Close()
 			return err
 		}
 		if e.Revision > maxRev {
@@ -254,18 +254,18 @@ func (s *Store) Apply(entries []wal.Entry) error {
 	}
 	if maxRev > 0 {
 		if err := b.Set(metaCurrentRevKey, encodeRev(maxRev), pebble.NoSync); err != nil {
-			b.Close()
+			_ = b.Close()
 			return fmt.Errorf("store: set current rev: %w", err)
 		}
 	}
 	if maxSeq > 0 {
 		if err := b.Set(metaLastSeqKey, encodeRev(maxSeq), pebble.NoSync); err != nil {
-			b.Close()
+			_ = b.Close()
 			return fmt.Errorf("store: set last seq: %w", err)
 		}
 	}
 	if err := b.Commit(pebble.NoSync); err != nil {
-		b.Close()
+		_ = b.Close()
 		return fmt.Errorf("store: commit batch: %w", err)
 	}
 	if maxRev > 0 {
@@ -293,7 +293,7 @@ func (s *Store) Recover(entries []wal.Entry) error {
 		}
 		if e.Op == wal.OpCompact {
 			if err := s.applyCompact(b, e.PrevRevision); err != nil {
-				b.Close()
+				_ = b.Close()
 				return err
 			}
 		} else {
@@ -342,18 +342,18 @@ func (s *Store) Recover(entries []wal.Entry) error {
 	}
 	if maxRev > 0 {
 		if err := b.Set(metaCurrentRevKey, encodeRev(maxRev), pebble.NoSync); err != nil {
-			b.Close()
+			_ = b.Close()
 			return fmt.Errorf("store: set current rev: %w", err)
 		}
 	}
 	if maxSeq > 0 {
 		if err := b.Set(metaLastSeqKey, encodeRev(maxSeq), pebble.NoSync); err != nil {
-			b.Close()
+			_ = b.Close()
 			return fmt.Errorf("store: set last seq: %w", err)
 		}
 	}
 	if err := b.Commit(pebble.Sync); err != nil {
-		b.Close()
+		_ = b.Close()
 		return fmt.Errorf("store: commit recover batch: %w", err)
 	}
 	if maxRev > atomic.LoadInt64(&s.currentRev) {

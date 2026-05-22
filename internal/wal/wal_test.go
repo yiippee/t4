@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -166,6 +168,31 @@ func TestWALSealAndFlush(t *testing.T) {
 	paths, _ := LocalSegments(dir)
 	if len(paths) == 0 {
 		t.Error("expected at least one sealed segment")
+	}
+}
+
+func TestMaxSequenceScansPastBadSegment(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, SegmentName(1, 1)), []byte("bad segment"), 0o600); err != nil {
+		t.Fatalf("write bad segment: %v", err)
+	}
+	sw, err := OpenSegmentWriter(dir, 1, 5)
+	if err != nil {
+		t.Fatalf("OpenSegmentWriter: %v", err)
+	}
+	if err := sw.Append(&Entry{ID: 7, Revision: 3, Term: 1, Op: OpCreate, Key: "k", Value: []byte("v")}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := sw.Seal(); err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+
+	maxSeq, err := MaxSequence(dir)
+	if err == nil {
+		t.Fatal("MaxSequence error: got nil, want bad segment error")
+	}
+	if maxSeq != 7 {
+		t.Fatalf("MaxSequence: want 7 got %d", maxSeq)
 	}
 }
 

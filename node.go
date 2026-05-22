@@ -403,8 +403,14 @@ func Open(cfg Config) (*Node, error) {
 	// taken post-Compact, breaking peer dedup. Take the max with the local
 	// WAL's last sequence in case the local WAL is ahead of Pebble.
 	nextSeq := db.LastSequence()
-	if maxSeq, merr := wal.MaxSequence(walDir); merr == nil && maxSeq > nextSeq {
+	if maxSeq, merr := wal.MaxSequence(walDir); maxSeq > nextSeq {
+		// MaxSequence may return a partial max with an error when one local
+		// segment is corrupt. Trust the partial value as a lower bound so the
+		// next writer cannot reuse a sequence that was already present in WAL.
 		nextSeq = maxSeq
+		if merr != nil {
+			log.Warnf("t4: scan local WAL sequence: %v", merr)
+		}
 	} else if merr != nil {
 		log.Warnf("t4: scan local WAL sequence: %v", merr)
 	}
@@ -540,8 +546,13 @@ func Open(cfg Config) (*Node, error) {
 			}
 			w.Close()
 			reopenSeq := freshDB.LastSequence()
-			if maxSeq, merr := wal.MaxSequence(walDir); merr == nil && maxSeq > reopenSeq {
+			if maxSeq, merr := wal.MaxSequence(walDir); maxSeq > reopenSeq {
+				// See the startup scan above: a partial max is still a lower
+				// bound that prevents WAL sequence reuse.
 				reopenSeq = maxSeq
+				if merr != nil {
+					log.Warnf("t4: scan local WAL sequence after GC-gap fix: %v", merr)
+				}
 			} else if merr != nil {
 				log.Warnf("t4: scan local WAL sequence after GC-gap fix: %v", merr)
 			}
@@ -990,8 +1001,8 @@ func (n *Node) Flush() error {
 	if n.closed.Load() {
 		return ErrClosed
 	}
-	rev := n.db.Load().CurrentRevision()
-	if err := n.wal.SealAndFlush(rev + 1); err != nil {
+	seq := n.db.Load().LastSequence()
+	if err := n.wal.SealAndFlush(seq + 1); err != nil {
 		return err
 	}
 	return n.db.Load().Flush()

@@ -66,8 +66,14 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 		wal.WithLogger(n.log),
 	)
 	nextSeq := n.db.Load().LastSequence()
-	if maxSeq, merr := wal.MaxSequence(walDir); merr == nil && maxSeq > nextSeq {
+	if maxSeq, merr := wal.MaxSequence(walDir); maxSeq > nextSeq {
+		// MaxSequence may return a partial max with an error when one local
+		// segment is corrupt. Trust the partial value as a lower bound so the
+		// new leader cannot reuse a sequence that was already present in WAL.
 		nextSeq = maxSeq
+		if merr != nil {
+			n.log.Warnf("t4: scan local WAL sequence before leadership: %v", merr)
+		}
 	} else if merr != nil {
 		n.log.Warnf("t4: scan local WAL sequence before leadership: %v", merr)
 	}
@@ -617,7 +623,8 @@ func (n *Node) forceCheckpoint(ctx context.Context) {
 		n.fenceMu.Unlock()
 		return
 	}
-	if err := n.wal.SealAndFlush(rev + 1); err != nil {
+	seq := n.db.Load().LastSequence()
+	if err := n.wal.SealAndFlush(seq + 1); err != nil {
 		n.fenceMu.Unlock()
 		n.log.Errorf("t4: startup checkpoint seal WAL: %v", err)
 		return
@@ -629,12 +636,12 @@ func (n *Node) forceCheckpoint(ctx context.Context) {
 	}
 	if n.sstUploader != nil {
 		n.sstUploader.Wait()
-		if err := n.cp.WriteWithRegistry(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry()); err != nil {
+		if err := n.cp.WriteWithRegistryAtSequence(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, seq, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry()); err != nil {
 			n.fenceMu.Unlock()
 			n.log.Errorf("t4: startup checkpoint rev=%d: %v", rev, err)
 			return
 		}
-	} else if err := n.cp.Write(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, "", n.cfg.AncestorStore); err != nil {
+	} else if err := n.cp.WriteAtSequence(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, seq, "", n.cfg.AncestorStore); err != nil {
 		n.fenceMu.Unlock()
 		n.log.Errorf("t4: startup checkpoint rev=%d: %v", rev, err)
 		return
@@ -655,7 +662,8 @@ func (n *Node) maybeCheckpoint(ctx context.Context) {
 		n.fenceMu.Unlock()
 		return
 	}
-	if err := n.wal.SealAndFlush(rev + 1); err != nil {
+	seq := n.db.Load().LastSequence()
+	if err := n.wal.SealAndFlush(seq + 1); err != nil {
 		n.fenceMu.Unlock()
 		n.log.Errorf("t4: checkpoint seal WAL: %v", err)
 		return
@@ -667,12 +675,12 @@ func (n *Node) maybeCheckpoint(ctx context.Context) {
 	}
 	if n.sstUploader != nil {
 		n.sstUploader.Wait()
-		if err := n.cp.WriteWithRegistry(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry()); err != nil {
+		if err := n.cp.WriteWithRegistryAtSequence(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, seq, "", n.sstUploader.Registry(), n.sstUploader.InheritedRegistry()); err != nil {
 			n.fenceMu.Unlock()
 			n.log.Errorf("t4: write checkpoint rev=%d: %v", rev, err)
 			return
 		}
-	} else if err := n.cp.Write(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, "", n.cfg.AncestorStore); err != nil {
+	} else if err := n.cp.WriteAtSequence(ctx, n.db.Load().Pebble(), n.cfg.ObjectStore, n.term, rev, seq, "", n.cfg.AncestorStore); err != nil {
 		n.fenceMu.Unlock()
 		n.log.Errorf("t4: write checkpoint rev=%d: %v", rev, err)
 		return
@@ -683,23 +691,23 @@ func (n *Node) maybeCheckpoint(ctx context.Context) {
 	n.log.Infof("t4: checkpoint written (rev=%d)", rev)
 
 	// GC WAL segments from S3 that are fully covered by this checkpoint AND
-	// that all connected followers have applied. Using min(leaderRev,
-	// minFollowerAppliedRev) as the GC boundary ensures we never delete a
-	// segment that a follower still needs to replay.
+	// that all connected followers have applied. WAL segment boundaries and
+	// follower ACKs are sequence-based, while the checkpoint manifest still
+	// advertises the user-visible revision.
 	gcCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	gcRev := rev
+	gcSeq := seq
 	if n.peerSrv != nil {
-		if minFollower := n.peerSrv.MinFollowerAppliedRev(); minFollower < gcRev {
-			gcRev = minFollower
+		if minFollower := n.peerSrv.MinFollowerAppliedRev(); minFollower < gcSeq {
+			gcSeq = minFollower
 		}
 	}
-	deleted, gcErr := wal.GCSegments(gcCtx, n.cfg.ObjectStore, gcRev, n.log)
+	deleted, gcErr := wal.GCSegments(gcCtx, n.cfg.ObjectStore, gcSeq, n.log)
 	if gcErr != nil {
 		n.log.Warnf("t4: wal gc: %v", gcErr)
 	} else if deleted > 0 {
 		metrics.WALGCTotal.Add(float64(deleted))
-		n.log.Infof("t4: wal gc: deleted %d segments (covered by checkpoint rev=%d)", deleted, gcRev)
+		n.log.Infof("t4: wal gc: deleted %d segments (covered by checkpoint seq=%d)", deleted, gcSeq)
 	}
 
 	// GC old checkpoint archives from S3, keeping the 2 most recent so that

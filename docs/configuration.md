@@ -55,7 +55,7 @@ Open(dir string, term uint64, startRev int64) error
 ReplayLocal(db wal.RecoveryStore, afterRev int64) error
 Append(e *wal.Entry) error
 AppendBatch(ctx context.Context, entries []*wal.Entry) error
-SealAndFlush(nextRev int64) error
+SealAndFlush(nextSeq int64) error
 Close() error
 }
 ```

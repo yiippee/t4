@@ -39,16 +39,16 @@ type Server struct {
 	buf             *entryBuffer
 	pending         []*wal.Entry
 	followers       map[string]chan *WalEntryMsg
-	followerAckRevs map[string]int64 // last ACK'd revision per follower
-	maxBroadcastRev int64            // highest revision sent via Broadcast
+	followerAckRevs map[string]int64 // last ACK'd sequence per follower
+	maxBroadcastRev int64            // highest sequence sent via Broadcast
 	forwardHandler  ForwardHandler
 
 	// ackNotify is a buffered-1 channel. A non-blocking send is made whenever
 	// any follower ACKs an entry or disconnects, waking WaitForFollowers.
 	ackNotify chan struct{}
 
-	// startRev is the first revision this leader will ever write — i.e.
-	// db.CurrentRevision()+1 at the moment becomeLeader ran.  A follower that
+	// startRev is the first sequence this leader will ever write — i.e.
+	// db.LastSequence()+1 at the moment becomeLeader ran.  A follower that
 	// connects with FromRevision < startRev has missed entries that are only
 	// in S3 (never in this leader's ring buffer) and must re-sync from S3
 	// before it can consume the live stream.
@@ -96,8 +96,8 @@ func (s *Server) ConnectedFollowers() int {
 	return len(s.followers)
 }
 
-// SetStartRev records the first revision this leader owns — callers pass
-// db.CurrentRevision()+1 immediately after becomeLeader completes its S3
+// SetStartRev records the first sequence this leader owns — callers pass
+// db.LastSequence()+1 immediately after becomeLeader completes its S3
 // replay.  Followers that connect with FromRevision < startRev are missing
 // entries that will never appear in the ring buffer; they must re-sync.
 func (s *Server) SetStartRev(rev int64) {
@@ -258,7 +258,7 @@ func requiredFollowerACKs(connected int, mode WaitMode) int {
 	}
 }
 
-// MinFollowerAppliedRev returns the minimum ACK'd revision across all currently
+// MinFollowerAppliedRev returns the minimum ACK'd sequence across all currently
 // connected followers. Used by the leader to determine the safe WAL GC boundary:
 // WAL segments are only deleted once all connected followers have applied them.
 //
@@ -394,6 +394,8 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 				// re-fetches the missed entries from the ring buffer.
 				return fmt.Errorf("follower stream closed: too slow, reconnect required")
 			}
+			// Invariant: non-commit messages are produced by EntryToMsg and
+			// must carry a non-zero sequence ID.
 			if !msg.Commit && msg.ID <= maxSent {
 				continue
 			}
@@ -469,6 +471,8 @@ func (b *entryBuffer) push(e *wal.Entry) {
 }
 
 func (b *entryBuffer) since(fromRev int64) ([]*wal.Entry, bool) {
+	// fromRev is the next WAL sequence requested by the follower; the name is
+	// retained to match the FollowRequest wire field.
 	if len(b.entries) == 0 {
 		return nil, true
 	}

@@ -3,12 +3,14 @@ package t4_test
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/t4db/t4"
+	"github.com/t4db/t4/internal/wal"
 	"github.com/t4db/t4/pkg/object"
 )
 
@@ -365,8 +367,7 @@ func TestNodeCompactDoesNotReuseWALSequenceAfterRestart(t *testing.T) {
 	dir := t.TempDir()
 	c := ctx(t)
 	n, err := t4.Open(t4.Config{
-		DataDir:     dir,
-		ObjectStore: object.NewMem(),
+		DataDir: dir,
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -385,8 +386,7 @@ func TestNodeCompactDoesNotReuseWALSequenceAfterRestart(t *testing.T) {
 	}
 
 	n, err = t4.Open(t4.Config{
-		DataDir:     dir,
-		ObjectStore: object.NewMem(),
+		DataDir: dir,
 	})
 	if err != nil {
 		t.Fatalf("Reopen: %v", err)
@@ -398,6 +398,45 @@ func TestNodeCompactDoesNotReuseWALSequenceAfterRestart(t *testing.T) {
 	}
 	if rev != 2 {
 		t.Fatalf("Put after reopen revision: want 2 got %d", rev)
+	}
+}
+
+func TestNodeFlushAfterCompactDoesNotReuseWALSequence(t *testing.T) {
+	dir := t.TempDir()
+	c := ctx(t)
+	n, err := t4.Open(t4.Config{
+		DataDir: dir,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = n.Close() })
+
+	if _, err := n.Put(c, "k", []byte("v1"), 0); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := n.Compact(c, 1); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if err := n.Flush(); err != nil {
+		t.Fatalf("Flush after first compact: %v", err)
+	}
+	if err := n.Compact(c, 1); err != nil {
+		t.Fatalf("second Compact: %v", err)
+	}
+	if err := n.Flush(); err != nil {
+		t.Fatalf("Flush after second compact: %v", err)
+	}
+
+	maxSeq, err := wal.MaxSequence(filepath.Join(dir, "wal"))
+	if err != nil {
+		t.Fatalf("MaxSequence: %v", err)
+	}
+	if maxSeq != 3 {
+		t.Fatalf("MaxSequence after repeated compact/flush: want 3 got %d", maxSeq)
+	}
+	if n.CurrentRevision() != 1 {
+		t.Fatalf("CurrentRevision after repeated compact/flush: want 1 got %d", n.CurrentRevision())
 	}
 }
 

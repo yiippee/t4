@@ -175,13 +175,13 @@ func replayRemote(ctx context.Context, db *istore.Store, obj object.Store, after
 
 	// Build per-term cutoffs to handle leader-change conflicts.
 	//
-	// When a new leader takes over at revision X, it starts writing a new term
-	// from revision X+1. The old leader may have written S3 segments that cover
-	// some of those same revisions (X+1, X+2, …). Applying both the old-term
-	// and new-term entries at the same revision would corrupt the index.
+	// When a new leader takes over at sequence X, it starts writing a new term
+	// from sequence X+1. The old leader may have written S3 segments that cover
+	// some of those same sequences (X+1, X+2, ...). Applying both the old-term
+	// and new-term entries at the same sequence would corrupt the index.
 	//
-	// cutoff[term] is the minimum firstRev among all segments with term > term.
-	// Old-term entries at revision >= cutoff are superseded by the new term and
+	// cutoff[term] is the minimum first sequence among all segments with term > term.
+	// Old-term entries at sequence >= cutoff are superseded by the new term and
 	// must be skipped. For the highest term present, cutoff = math.MaxInt64 (no
 	// upper bound — apply all entries).
 	cutoff := walTermCutoffs(keys)
@@ -255,12 +255,13 @@ func replayRemote(ctx context.Context, db *istore.Store, obj object.Store, after
 	return nil
 }
 
-// walTermCutoffs returns a map from term → the minimum firstRev of any
+// walTermCutoffs returns a map from term to the minimum first sequence of any
 // segment whose term is strictly greater. Entries from a given term at
-// revisions >= cutoff are superseded by the newer term and should be skipped.
+// sequences >= cutoff are superseded by the newer term and should be skipped.
 // The highest term maps to math.MaxInt64 (no cutoff).
 func walTermCutoffs(keys []string) map[uint64]int64 {
-	// Collect the minimum firstRev for each term.
+	// Collect the minimum first sequence for each term. The object-key field is
+	// still named firstRev for v1 WAL compatibility.
 	minFirstRev := map[uint64]int64{}
 	for _, key := range keys {
 		term, firstRev := parseWALKey(key)
@@ -281,7 +282,7 @@ func walTermCutoffs(keys []string) map[uint64]int64 {
 	return cutoff
 }
 
-// parseWALKey extracts term and firstRev from a WAL object key of the form
+// parseWALKey extracts term and first sequence from a WAL object key of the form
 // "wal/{term:010d}/{firstRev:020d}".
 func parseWALKey(key string) (term uint64, firstRev int64) {
 	parts := strings.SplitN(key, "/", 3)

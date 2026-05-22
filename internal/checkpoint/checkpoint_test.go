@@ -104,6 +104,7 @@ func TestWriteReadManifest(t *testing.T) {
 	want := &checkpoint.Manifest{
 		CheckpointKey: "checkpoint/0000000001/00000000000000000042",
 		Revision:      42,
+		LastSequence:  45,
 		Term:          1,
 		LastWALKey:    "wal/0000000001/00000000000000000040",
 	}
@@ -123,6 +124,9 @@ func TestWriteReadManifest(t *testing.T) {
 	}
 	if got.Revision != want.Revision {
 		t.Errorf("Revision: want %d got %d", want.Revision, got.Revision)
+	}
+	if got.LastSequence != want.LastSequence {
+		t.Errorf("LastSequence: want %d got %d", want.LastSequence, got.LastSequence)
 	}
 	if got.Term != want.Term {
 		t.Errorf("Term: want %d got %d", want.Term, got.Term)
@@ -322,6 +326,9 @@ func TestWriteRestore(t *testing.T) {
 	}
 	if m.Revision != 2 || m.Term != 1 {
 		t.Errorf("manifest: want rev=2 term=1, got rev=%d term=%d", m.Revision, m.Term)
+	}
+	if m.LastSequence != 2 {
+		t.Errorf("manifest LastSequence: want 2 got %d", m.LastSequence)
 	}
 
 	// Restore to a new directory.

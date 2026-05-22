@@ -101,7 +101,7 @@ type fakeWAL struct {
 }
 
 func (f *fakeWAL) Append(e *wal.Entry) error        { return f.real.Append(e) }
-func (f *fakeWAL) SealAndFlush(nextRev int64) error { return f.real.SealAndFlush(nextRev) }
+func (f *fakeWAL) SealAndFlush(nextSeq int64) error { return f.real.SealAndFlush(nextSeq) }
 func (f *fakeWAL) Close() error                     { return f.real.Close() }
 func (f *fakeWAL) Open(dir string, term uint64, startRev int64) error {
 	return f.real.Open(dir, term, startRev)

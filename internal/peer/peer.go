@@ -170,20 +170,23 @@ func unmarshalWalEntryMsg(data []byte, m *WalEntryMsg) error {
 // ── WAL stream message types ──────────────────────────────────────────────────
 
 // FollowRequest is the single message sent by a follower to open a WAL stream.
+// FromRevision is a legacy field name; after the sequence/revision split it
+// carries the next WAL sequence requested by the follower.
 type FollowRequest struct {
 	FromRevision int64  `json:"from_revision"`
 	NodeID       string `json:"node_id"`
 }
 
 // AckMsg is sent by a follower to the leader on the bidi Follow stream to
-// acknowledge that it has durably written all entries up to Revision to its
-// local WAL. The leader waits for ACKs from all connected followers before
+// acknowledge that it has durably written all entries up to the sequence carried
+// in Revision. The leader waits for ACKs from all connected followers before
 // committing each batch to Pebble (quorum commit).
 type AckMsg struct {
 	Revision int64 `json:"revision"`
 }
 
-// WalEntryMsg is the wire representation of a wal.Entry.
+// WalEntryMsg is the wire representation of a wal.Entry. Receivers must use ID
+// for ordering/ACK semantics and Revision only as the user-visible revision.
 // Shutdown is a special flag: when true the leader is shutting down gracefully
 // and the follower should start a TakeOver election immediately.
 type WalEntryMsg struct {

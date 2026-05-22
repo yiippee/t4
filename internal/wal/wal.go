@@ -115,13 +115,20 @@ func Open(dir string, term uint64, startRev int64, opts ...Option) (*WAL, error)
 func MaxSequence(dir string) (int64, error) {
 	paths, err := LocalSegments(dir)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
 		return 0, err
 	}
 	var maxSeq int64
+	var firstErr error
 	for _, path := range paths {
 		sr, closer, err := OpenSegmentFile(path)
 		if err != nil {
-			return maxSeq, err
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 		entries, readErr := sr.ReadAll()
 		closer()
@@ -131,10 +138,13 @@ func MaxSequence(dir string) (int64, error) {
 			}
 		}
 		if readErr != nil {
-			return maxSeq, readErr
+			if firstErr == nil {
+				firstErr = readErr
+			}
+			continue
 		}
 	}
-	return maxSeq, nil
+	return maxSeq, firstErr
 }
 
 // Open opens (or creates) the WAL directory and prepares the active segment.
@@ -526,8 +536,9 @@ drained:
 }
 
 // SealAndFlush seals the active segment immediately (blocking) and queues it
-// for upload. Used before taking a checkpoint.
-func (w *WAL) SealAndFlush(nextRev int64) error {
+// for upload. nextSeq is the first WAL sequence expected in the new segment.
+// Used before taking a checkpoint.
+func (w *WAL) SealAndFlush(nextSeq int64) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.active == nil || w.active.EntryCount() == 0 {
@@ -537,7 +548,7 @@ func (w *WAL) SealAndFlush(nextRev int64) error {
 	if err := old.Seal(); err != nil {
 		return err
 	}
-	sw, err := OpenSegmentWriter(w.dir, w.term, nextRev)
+	sw, err := OpenSegmentWriter(w.dir, w.term, nextSeq)
 	if err != nil {
 		return err
 	}

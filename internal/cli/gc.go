@@ -52,18 +52,18 @@ Run this periodically (e.g. once a day) to reclaim S3 storage.`,
 			}
 			logrus.Infof("orphan sst gc: deleted %d SST file(s)", deletedSSTs)
 
-			// Pass 3: WAL segment GC — use the current manifest revision as the safe horizon.
+			// Pass 3: WAL segment GC — use the current manifest sequence as the safe horizon.
 			manifest, err := cp.ReadManifest(ctx, store)
 			if err != nil {
 				return fmt.Errorf("read manifest: %w", err)
 			}
 			var deletedWAL int
 			if manifest != nil {
-				deletedWAL, err = wal.GCSegments(ctx, store, manifest.Revision, logrus.StandardLogger())
+				deletedWAL, err = wal.GCSegments(ctx, store, manifest.LastSequence, logrus.StandardLogger())
 				if err != nil {
 					return fmt.Errorf("wal gc: %w", err)
 				}
-				logrus.Infof("wal gc: deleted %d segment(s) covered by checkpoint rev=%d", deletedWAL, manifest.Revision)
+				logrus.Infof("wal gc: deleted %d segment(s) covered by checkpoint seq=%d", deletedWAL, manifest.LastSequence)
 			} else {
 				logrus.Info("wal gc: no manifest found, skipping WAL segment GC")
 			}

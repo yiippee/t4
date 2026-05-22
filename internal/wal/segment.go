@@ -15,7 +15,7 @@ import (
 //
 //	[4:  magic    "T4\x01\n"]
 //	[8:  term     uint64 BE]
-//	[8:  firstRev int64  BE]      ← first revision in this segment (0 if unknown at open time)
+//	[8:  firstRev int64  BE]      ← first WAL sequence in this segment (legacy name)
 //	[entry frames ... ]
 //
 // The third byte of the magic string is the WAL format version.
@@ -163,7 +163,8 @@ func (sw *SegmentWriter) EntryCount() int { return sw.entryCount }
 // Term returns the term this segment belongs to.
 func (sw *SegmentWriter) Term() uint64 { return sw.term }
 
-// FirstRev returns the first revision in this segment.
+// FirstRev returns the first WAL sequence in this segment. The name is kept for
+// compatibility with older code and on-disk object naming.
 func (sw *SegmentWriter) FirstRev() int64 { return sw.firstRev }
 
 // SegmentName returns the canonical file name for a segment.
