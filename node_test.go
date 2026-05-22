@@ -22,7 +22,7 @@ func openNode(t *testing.T) *t4.Node {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	t.Cleanup(func() { n.Close() })
+	t.Cleanup(func() { _ = n.Close() })
 	return n
 }
 
