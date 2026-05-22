@@ -391,7 +391,7 @@ func TestNodeCompactDoesNotReuseWALSequenceAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reopen: %v", err)
 	}
-	t.Cleanup(func() { n.Close() })
+	t.Cleanup(func() { _ = n.Close() })
 	rev, err := n.Put(c, "k", []byte("v2"), 0)
 	if err != nil {
 		t.Fatalf("Put after reopen: %v", err)

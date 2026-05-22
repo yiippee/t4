@@ -18,8 +18,12 @@ import (
 )
 
 // replayPinned replays the specific WAL segments listed in rp, applying
-// entries with revision > afterRev. Used during RestorePoint bootstrap.
-func replayPinned(ctx context.Context, db *istore.Store, rp *RestorePoint, afterRev int64, log Logger) error {
+// entries with Sequence > afterSeq. Used during RestorePoint bootstrap.
+// afterSeq is the highest WAL/peer-stream sequence already applied to db
+// (typically db.LastSequence()); filtering by Sequence rather than Revision
+// is required after the seq/rev split because Compact entries carry the
+// same Revision as the preceding data write but a distinct Sequence.
+func replayPinned(ctx context.Context, db *istore.Store, rp *RestorePoint, afterSeq int64, log Logger) error {
 	for _, seg := range rp.WALSegments {
 		rc, err := rp.Store.GetVersioned(ctx, seg.Key, seg.VersionID)
 		if err != nil {
@@ -37,7 +41,7 @@ func replayPinned(ctx context.Context, db *istore.Store, rp *RestorePoint, after
 		}
 		var applicable []wal.Entry
 		for _, e := range entries {
-			if e.Revision > afterRev {
+			if e.Sequence() > afterSeq {
 				applicable = append(applicable, *e)
 			}
 		}
@@ -158,7 +162,12 @@ func (n *Node) restoreDBIfBehindCheckpoint(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
-func replayRemote(ctx context.Context, db *istore.Store, obj object.Store, afterRev int64, log Logger) error {
+// replayRemote replays WAL segments stored in the object store. afterSeq is
+// the highest WAL/peer-stream sequence already applied to db (typically
+// db.LastSequence()); entries with Sequence <= afterSeq are skipped. After
+// merge, the stream is required to be sequence-contiguous starting from
+// afterSeq+1.
+func replayRemote(ctx context.Context, db *istore.Store, obj object.Store, afterSeq int64, log Logger) error {
 	keys, err := obj.List(ctx, "wal/")
 	if err != nil {
 		return err
@@ -197,7 +206,7 @@ func replayRemote(ctx context.Context, db *istore.Store, obj object.Store, after
 			log.Warnf("t4: partial remote segment %q: %v", key, readErr)
 		}
 		for _, e := range entries {
-			if e.Sequence() <= afterRev {
+			if e.Sequence() <= afterSeq {
 				continue // already covered by checkpoint / local WAL
 			}
 			if e.Sequence() >= termCutoff {
@@ -230,9 +239,9 @@ func replayRemote(ctx context.Context, db *istore.Store, obj object.Store, after
 		merged = append(merged, e)
 	}
 
-	// Fail closed on holes: a missing revision means we likely raced WAL GC
+	// Fail closed on holes: a missing sequence means we likely raced WAL GC
 	// during bootstrap/resync and must restore from a fresher checkpoint.
-	expected := afterRev + 1
+	expected := afterSeq + 1
 	for _, e := range merged {
 		if e.Sequence() != expected {
 			return fmt.Errorf("replayRemote: missing sequence(s): expected %d got %d", expected, e.Sequence())

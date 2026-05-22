@@ -18,7 +18,11 @@ import (
 func (n *Node) followLoop(bgCtx context.Context) {
 	lock := election.NewLock(n.cfg.ObjectStore, n.cfg.NodeID, n.cfg.AdvertisePeerAddr)
 	cli := n.peerCli
-	fromRev := n.db.Load().CurrentRevision() + 1
+	// fromRev is the next WAL/peer-stream sequence to request. The peer
+	// protocol's FollowRequest.FromRevision is a sequence number (after the
+	// seq/rev split, Compact entries consume sequences but not revisions),
+	// so seed from LastSequence rather than CurrentRevision.
+	fromRev := n.db.Load().LastSequence() + 1
 
 	for {
 		err := cli.Follow(
@@ -87,7 +91,7 @@ func (n *Node) followLoop(bgCtx context.Context) {
 				return
 			}
 			reCtx, reCancel := context.WithTimeout(bgCtx, 5*time.Minute)
-			rerr := replayRemote(reCtx, n.db.Load(), n.cfg.ObjectStore, n.db.Load().CurrentRevision(), n.log)
+			rerr := replayRemote(reCtx, n.db.Load(), n.cfg.ObjectStore, n.db.Load().LastSequence(), n.log)
 			reCancel()
 			if rerr != nil {
 				n.log.Errorf("t4: follower S3 resync failed: %v — retrying", rerr)
@@ -97,7 +101,7 @@ func (n *Node) followLoop(bgCtx context.Context) {
 					return
 				}
 			} else {
-				fromRev = n.db.Load().CurrentRevision() + 1
+				fromRev = n.db.Load().LastSequence() + 1
 				// Wake any goroutines blocked in WaitForRevision that entered
 				// their wait loop while replayRemote was running. Recover does
 				// not broadcast, so without this they would sleep until the
@@ -186,7 +190,7 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 			n.log.Infof("t4: takeover: catching up from S3 before takeover (ours=%d, leader=%d)",
 				n.db.Load().CurrentRevision(), existing.CommittedRev)
 			catchupCtx, catchupCancel := context.WithTimeout(bgCtx, 2*time.Minute)
-			rerr := replayRemote(catchupCtx, n.db.Load(), n.cfg.ObjectStore, n.db.Load().CurrentRevision(), n.log)
+			rerr := replayRemote(catchupCtx, n.db.Load(), n.cfg.ObjectStore, n.db.Load().LastSequence(), n.log)
 			catchupCancel()
 			if rerr != nil {
 				n.log.Errorf("t4: takeover catch-up replay: %v — will retry", rerr)

@@ -27,6 +27,12 @@ var (
 	// current revision even when the last WAL entry was an OpCompact (which
 	// does not write a log key).
 	metaCurrentRevKey = []byte{prefixMeta, 'r', 'e', 'v'}
+	// metaLastSeqKey persists the highest WAL/peer-stream sequence applied.
+	// Used by replayRemote to validate the WAL stream is contiguous starting
+	// from the next sequence after the last persisted one. Diverges from
+	// metaCurrentRevKey after Compact entries (which consume a sequence but
+	// not a revision).
+	metaLastSeqKey = []byte{prefixMeta, 's', 'e', 'q'}
 
 	// Iteration bounds.
 	logLower = []byte{prefixLog, 0, 0, 0, 0, 0, 0, 0, 0}

@@ -158,8 +158,12 @@ func (w *WAL) Open(dir string, term uint64, startRev int64) error {
 }
 
 // ReplayLocal replays locally stored WAL segments into db, applying entries
-// whose revision is greater than afterRev.
-func (w *WAL) ReplayLocal(db RecoveryStore, afterRev int64) error {
+// whose Sequence is greater than afterSeq. afterSeq is the highest
+// WAL/peer-stream sequence already applied (typically db.LastSequence());
+// filtering by Sequence rather than Revision is required after the seq/rev
+// split because Compact entries share their Revision with the preceding
+// data write but have a distinct Sequence.
+func (w *WAL) ReplayLocal(db RecoveryStore, afterSeq int64) error {
 	paths, err := LocalSegments(w.dir)
 	if err != nil {
 		return err
@@ -176,7 +180,7 @@ func (w *WAL) ReplayLocal(db RecoveryStore, afterRev int64) error {
 		}
 		var applicable []Entry
 		for _, e := range entries {
-			if e.Sequence() > afterRev {
+			if e.Sequence() > afterSeq {
 				applicable = append(applicable, *e)
 			}
 		}

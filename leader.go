@@ -48,7 +48,7 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 		cpCancel()
 
 		reCtx, reCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		if err := replayRemote(reCtx, n.db.Load(), n.cfg.ObjectStore, n.db.Load().CurrentRevision(), n.log); err != nil {
+		if err := replayRemote(reCtx, n.db.Load(), n.cfg.ObjectStore, n.db.Load().LastSequence(), n.log); err != nil {
 			reCancel()
 			return fmt.Errorf("t4: becomeLeader replay remote WAL: %w", err)
 		}
@@ -65,7 +65,7 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 		wal.WithSegmentMaxAge(n.cfg.SegmentMaxAge),
 		wal.WithLogger(n.log),
 	)
-	nextSeq := n.db.Load().CurrentRevision()
+	nextSeq := n.db.Load().LastSequence()
 	if maxSeq, merr := wal.MaxSequence(walDir); merr == nil && maxSeq > nextSeq {
 		nextSeq = maxSeq
 	} else if merr != nil {
@@ -106,11 +106,15 @@ func (n *Node) becomeLeader(bgCtx context.Context, lock *election.Lock, rec *ele
 	// Install the forward handler after role is set to leader so that
 	// HandleForward sees the correct role and executes writes directly.
 	peerSrv.SetForwardHandler(n)
-	// Tell the peer server what the first revision this leader will write is.
-	// Followers connecting with a lower fromRev are missing entries that were
-	// only replayed into Pebble from S3 (never in the ring buffer) and must
-	// re-sync before consuming the live stream.
-	peerSrv.SetStartRev(n.db.Load().CurrentRevision() + 1)
+	// Tell the peer server what the first sequence this leader will write is.
+	// FollowRequest.FromRevision is interpreted as a WAL/peer-stream sequence
+	// (see peer.Server). Followers connecting with a lower fromRev are missing
+	// entries that were only replayed into Pebble from S3 (never in the ring
+	// buffer) and must re-sync before consuming the live stream. After a
+	// post-compact checkpoint LastSequence > CurrentRevision, so seeding
+	// startRev from CurrentRevision would let stale followers connect from a
+	// sequence that exists only in Pebble/S3 — not the ring buffer.
+	peerSrv.SetStartRev(n.db.Load().LastSequence() + 1)
 
 	go func() {
 		if err := grpcSrv.Serve(lis); err != nil {
