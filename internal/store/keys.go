@@ -51,6 +51,7 @@ type record struct {
 	value          []byte
 	createRevision int64
 	prevRevision   int64
+	version        int64
 	lease          int64
 	create         bool
 	delete         bool
@@ -120,8 +121,12 @@ func decodeRev(b []byte) int64 {
 	return int64(binary.BigEndian.Uint64(b))
 }
 
-// entryHeaderSize: flags(1) + createRev(8) + prevRev(8) + lease(8) + keyLen(4) = 29
-const entryHeaderSize = 29
+// entryHeaderSizeV1: flags(1) + createRev(8) + prevRev(8) + lease(8) + keyLen(4) = 29
+// entryHeaderSize: entryHeaderSizeV1 + version(8) = 37
+const (
+	entryHeaderSizeV1 = 29
+	entryHeaderSize   = entryHeaderSizeV1 + 8
+)
 
 func marshalRecord(r *record) []byte {
 	var flags byte
@@ -136,14 +141,15 @@ func marshalRecord(r *record) []byte {
 	binary.BigEndian.PutUint64(buf[1:9], uint64(r.createRevision))
 	binary.BigEndian.PutUint64(buf[9:17], uint64(r.prevRevision))
 	binary.BigEndian.PutUint64(buf[17:25], uint64(r.lease))
-	binary.BigEndian.PutUint32(buf[25:29], uint32(len(r.key)))
-	copy(buf[29:], r.key)
-	copy(buf[29+len(r.key):], r.value)
+	binary.BigEndian.PutUint64(buf[25:33], uint64(r.version))
+	binary.BigEndian.PutUint32(buf[33:37], uint32(len(r.key)))
+	copy(buf[37:], r.key)
+	copy(buf[37+len(r.key):], r.value)
 	return buf
 }
 
 func unmarshalRecord(b []byte) (*record, error) {
-	if len(b) < entryHeaderSize {
+	if len(b) < entryHeaderSizeV1 {
 		return nil, fmt.Errorf("store: record too short (%d bytes)", len(b))
 	}
 	r := &record{}
@@ -153,15 +159,38 @@ func unmarshalRecord(b []byte) (*record, error) {
 	r.createRevision = int64(binary.BigEndian.Uint64(b[1:9]))
 	r.prevRevision = int64(binary.BigEndian.Uint64(b[9:17]))
 	r.lease = int64(binary.BigEndian.Uint64(b[17:25]))
-	klen := int(binary.BigEndian.Uint32(b[25:29]))
-	if len(b) < entryHeaderSize+klen {
+	headerSize := entryHeaderSizeV1
+	if len(b) >= entryHeaderSize {
+		version := int64(binary.BigEndian.Uint64(b[25:33]))
+		klen := int(binary.BigEndian.Uint32(b[33:37]))
+		if versionRecordHeaderLooksValid(version, r.createRevision, r.prevRevision, r.delete) && len(b) >= entryHeaderSize+klen {
+			r.version = version
+			headerSize = entryHeaderSize
+		}
+	}
+	klen := int(binary.BigEndian.Uint32(b[headerSize-4 : headerSize]))
+	if len(b) < headerSize+klen {
 		return nil, fmt.Errorf("store: record key truncated")
 	}
-	r.key = string(b[entryHeaderSize : entryHeaderSize+klen])
-	raw := b[entryHeaderSize+klen:]
+	r.key = string(b[headerSize : headerSize+klen])
+	raw := b[headerSize+klen:]
 	if len(raw) > 0 {
 		r.value = make([]byte, len(raw))
 		copy(r.value, raw)
 	}
 	return r, nil
+}
+
+func versionRecordHeaderLooksValid(version, createRev, prevRev int64, deleted bool) bool {
+	if version <= 0 {
+		return false
+	}
+	if prevRev == 0 {
+		return version == 1
+	}
+	maxVersion := prevRev - createRev + 1
+	if !deleted {
+		maxVersion++
+	}
+	return maxVersion > 0 && version <= maxVersion
 }

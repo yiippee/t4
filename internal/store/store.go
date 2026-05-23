@@ -381,6 +381,7 @@ func (s *Store) applyEntry(b *pebble.Batch, e *wal.Entry) error {
 		value:          e.Value,
 		createRevision: e.CreateRevision,
 		prevRevision:   e.PrevRevision,
+		version:        entryVersion(e.Version),
 		lease:          e.Lease,
 		create:         e.Op == wal.OpCreate,
 		delete:         e.Op == wal.OpDelete,
@@ -416,6 +417,7 @@ func (s *Store) applyTxnEntry(b *pebble.Batch, e *wal.Entry) error {
 			value:          op.Value,
 			createRevision: op.CreateRevision,
 			prevRevision:   op.PrevRevision,
+			version:        entryVersion(op.Version),
 			lease:          op.Lease,
 			create:         op.Op == wal.OpCreate,
 			delete:         op.Op == wal.OpDelete,
@@ -560,6 +562,7 @@ type KeyValue struct {
 	Revision       int64
 	CreateRevision int64
 	PrevRevision   int64
+	Version        int64
 	Lease          int64
 }
 
@@ -656,6 +659,7 @@ func (s *Store) getLogEntry(key string, rev int64) (*KeyValue, error) {
 			Revision:       rev,
 			CreateRevision: r.createRevision,
 			PrevRevision:   r.prevRevision,
+			Version:        recordVersion(r),
 			Lease:          r.lease,
 		}, nil
 	}
@@ -684,6 +688,7 @@ func (s *Store) getLogEntry(key string, rev int64) (*KeyValue, error) {
 				Revision:       rev,
 				CreateRevision: r.createRevision,
 				PrevRevision:   r.prevRevision,
+				Version:        recordVersion(r),
 				Lease:          r.lease,
 			}, nil
 		}
@@ -719,6 +724,7 @@ func (s *Store) getAtRevision(key string, targetRev int64) (*KeyValue, error) {
 			Revision:       rev,
 			CreateRevision: r.createRevision,
 			PrevRevision:   r.prevRevision,
+			Version:        recordVersion(r),
 			Lease:          r.lease,
 		}, nil
 	}
@@ -1038,6 +1044,7 @@ func (s *Store) scanLog(prefix string, fromRev, toRev int64, withPrevKV bool) ([
 			Revision:       rev,
 			CreateRevision: r.createRevision,
 			PrevRevision:   r.prevRevision,
+			Version:        recordVersion(r),
 			Lease:          r.lease,
 		}
 		var prevKV *KeyValue
@@ -1059,4 +1066,21 @@ func (s *Store) scanLog(prefix string, fromRev, toRev int64, withPrevKV bool) ([
 		})
 	}
 	return events, scanned, iter.Error()
+}
+
+func recordVersion(r *record) int64 {
+	if r.version > 0 {
+		return r.version
+	}
+	if r.delete {
+		return 0
+	}
+	return 1
+}
+
+func entryVersion(version int64) int64 {
+	if version > 0 {
+		return version
+	}
+	return 1
 }

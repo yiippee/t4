@@ -26,7 +26,8 @@ import (
 // Version history:
 //
 //	1 (\x01) — original format; CRC32C-framed entries, big-endian fixed fields.
-//	2 (\x02) — entry payload includes a WAL sequence ID separate from revision.
+//	2 (\x02) — entry payload includes a WAL sequence ID separate from revision
+//	            and etcd-style per-key version.
 const (
 	// WALFormatVersion is the format version encoded in the magic byte of every
 	// segment file. Increment this constant (and update segMagic) when making
@@ -227,7 +228,7 @@ func newSegmentReader(r io.Reader) (*SegmentReader, error) {
 		return nil, fmt.Errorf("wal: bad segment magic %q", hdr[0:4])
 	}
 	version := int(hdr[2])
-	if version != 1 && version != WALFormatVersion {
+	if version < 1 || version > WALFormatVersion {
 		return nil, fmt.Errorf("wal: unsupported segment version %d", version)
 	}
 	return &SegmentReader{

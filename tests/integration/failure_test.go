@@ -3,6 +3,7 @@ package integration_test
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1427,14 +1428,17 @@ func TestWALCorruptionMidSegment(t *testing.T) {
 		t.Fatalf("Seal: %v", err)
 	}
 
-	// Corrupt the CRC of entry at index 10 (key "/wal/10").
-	// Entries 0–9 have key len 6 → frame = 8 header + 57 fixed + 6 key + 1 val = 72 bytes.
-	// Entry 10 starts at: 20 (segment header) + 10*72 = 740; CRC at +4 → byte 744.
-	const corruptOffset = 20 + 10*72 + 4 // = 744
 	segPath := sw.Path()
 	data, err := os.ReadFile(segPath)
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
+	}
+
+	// Corrupt the CRC of entry at index 10 (key "/wal/10"). Compute the frame
+	// offset from length headers instead of hard-coding the WAL payload layout.
+	corruptOffset, err := walFrameCRCOffset(data, 10)
+	if err != nil {
+		t.Fatalf("walFrameCRCOffset: %v", err)
 	}
 	if corruptOffset >= len(data) {
 		t.Fatalf("corruptOffset %d >= file len %d — frame layout changed?", corruptOffset, len(data))
@@ -1468,6 +1472,25 @@ func TestWALCorruptionMidSegment(t *testing.T) {
 	}
 	t.Logf("WAL corruption recovery: %d entries recovered before corrupt frame (err: %v)",
 		len(entries), readErr)
+}
+
+func walFrameCRCOffset(segment []byte, frameIndex int) (int, error) {
+	if frameIndex < 0 {
+		return 0, fmt.Errorf("negative frame index %d", frameIndex)
+	}
+	const segmentHeaderLen = 20
+	off := segmentHeaderLen
+	for i := 0; i <= frameIndex; i++ {
+		if len(segment)-off < 8 {
+			return 0, fmt.Errorf("frame %d header truncated at offset %d", i, off)
+		}
+		if i == frameIndex {
+			return off + 4, nil
+		}
+		payloadLen := int(binary.BigEndian.Uint32(segment[off : off+4]))
+		off += 8 + payloadLen
+	}
+	return 0, fmt.Errorf("frame %d not found", frameIndex)
 }
 
 // ── TestFailoverTime ──────────────────────────────────────────────────────────

@@ -340,9 +340,14 @@ func (s *Server) drainWatch(wctx context.Context, wcancel context.CancelFunc, wa
 	// not the live node clock — apiserver uses the header rev to advance its
 	// watchCache, and if it leapfrogs past events that arrive in a later frame,
 	// those events are silently dropped from the cache.
-	var batchMaxRev, progressRev int64
+	var batchMaxRev int64
+	progressRev := s.node.CurrentRevision()
 	flush := func() bool {
 		if len(batch) == 0 {
+			if batchMaxRev > progressRev {
+				progressRev = batchMaxRev
+			}
+			batchMaxRev = 0
 			return true
 		}
 		toSend := batch

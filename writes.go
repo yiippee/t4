@@ -68,13 +68,14 @@ func (n *Node) preparePut(key string, value []byte, lease int64) (wal.Entry, err
 		kv: &istore.KeyValue{
 			Key: key, Value: value, Revision: newRev,
 			CreateRevision: createRev, PrevRevision: prevRev,
-			Lease: lease,
+			Version: nextPutVersion(existing), Lease: lease,
 		},
 	}
+	version := n.pending[key].kv.Version
 	return wal.Entry{
 		ID: seq, Revision: newRev, Term: n.term, Op: op,
 		Key: key, Value: value, Lease: lease,
-		CreateRevision: createRev, PrevRevision: prevRev,
+		CreateRevision: createRev, PrevRevision: prevRev, Version: version,
 	}, nil
 }
 
@@ -112,12 +113,12 @@ func (n *Node) Create(ctx context.Context, key string, value []byte, lease int64
 		rev: newRev,
 		kv: &istore.KeyValue{
 			Key: key, Value: value, Revision: newRev,
-			CreateRevision: newRev, Lease: lease,
+			CreateRevision: newRev, Version: 1, Lease: lease,
 		},
 	}
 	e := wal.Entry{
 		ID: seq, Revision: newRev, Term: n.term, Op: wal.OpCreate,
-		Key: key, Value: value, Lease: lease, CreateRevision: newRev,
+		Key: key, Value: value, Lease: lease, CreateRevision: newRev, Version: 1,
 	}
 	req := newWriteReq(ctx, e)
 	n.writeC <- req
@@ -161,13 +162,14 @@ func (n *Node) Update(ctx context.Context, key string, value []byte, revision, l
 		kv: &istore.KeyValue{
 			Key: key, Value: value, Revision: newRev,
 			CreateRevision: existing.CreateRevision, PrevRevision: existing.Revision,
-			Lease: lease,
+			Version: kvVersion(existing) + 1, Lease: lease,
 		},
 	}
+	version := n.pending[key].kv.Version
 	e := wal.Entry{
 		ID: seq, Revision: newRev, Term: n.term, Op: wal.OpUpdate,
 		Key: key, Value: value, Lease: lease,
-		CreateRevision: existing.CreateRevision, PrevRevision: existing.Revision,
+		CreateRevision: existing.CreateRevision, PrevRevision: existing.Revision, Version: version,
 	}
 	oldKV := toKV(existing)
 	req := newWriteReq(ctx, e)
@@ -270,6 +272,7 @@ func (n *Node) prepareDelete(key string) (wal.Entry, error) {
 	return wal.Entry{
 		ID: seq, Revision: newRev, Term: n.term, Op: wal.OpDelete,
 		Key: key, CreateRevision: existing.CreateRevision, PrevRevision: existing.Revision,
+		Version: kvVersion(existing),
 	}, nil
 }
 
@@ -290,12 +293,6 @@ func (n *Node) readKey(key string) (*istore.KeyValue, error) {
 
 // txnCondMatches reports whether existing satisfies cond.
 // existing is nil when the key does not exist.
-//
-// Note on TxnCondVersion: t4 does not track a per-key write count, so Version
-// is treated as a binary presence flag — 0 means the key is absent, 1 means it
-// is present. TxnCondGreater and TxnCondLess on Version are therefore
-// semantically equivalent to "> 0" and "< 1" respectively; callers that need
-// accurate multi-version comparisons should use TxnCondMod instead.
 func txnCondMatches(cond TxnCondition, existing *istore.KeyValue) bool {
 	var (
 		modRev    int64
@@ -307,7 +304,7 @@ func txnCondMatches(cond TxnCondition, existing *istore.KeyValue) bool {
 	if existing != nil {
 		modRev = existing.Revision
 		createRev = existing.CreateRevision
-		version = 1 // t4 does not track per-key write count; treat as "exists"
+		version = kvVersion(existing)
 		lease = existing.Lease
 		val = existing.Value
 	}
@@ -525,6 +522,7 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 		lease          int64
 		createRevision int64
 		prevRevision   int64
+		version        int64
 		skip           bool // delete of a non-existent key
 	}
 	resolved := make([]resolvedOp, 0, len(ops))
@@ -536,17 +534,19 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 		switch op.Type {
 		case TxnPut:
 			var walOp wal.Op
-			var createRev, prevRev int64
+			var createRev, prevRev, version int64
 			if existing == nil {
 				walOp = wal.OpCreate
+				version = 1
 			} else {
 				walOp = wal.OpUpdate
 				createRev = existing.CreateRevision
 				prevRev = existing.Revision
+				version = kvVersion(existing) + 1
 			}
 			resolved = append(resolved, resolvedOp{
 				walOp: walOp, key: op.Key, value: op.Value, lease: op.Lease,
-				createRevision: createRev, prevRevision: prevRev,
+				createRevision: createRev, prevRevision: prevRev, version: version,
 			})
 		case TxnDelete:
 			if existing == nil {
@@ -556,6 +556,7 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 			resolved = append(resolved, resolvedOp{
 				walOp: wal.OpDelete, key: op.Key,
 				createRevision: existing.CreateRevision, prevRevision: existing.Revision,
+				version: kvVersion(existing),
 			})
 		}
 	}
@@ -597,7 +598,7 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 		}
 		subOps[i] = wal.TxnSubOp{
 			Op: r.walOp, Key: r.key, Value: r.value, Lease: r.lease,
-			CreateRevision: cr, PrevRevision: r.prevRevision,
+			CreateRevision: cr, PrevRevision: r.prevRevision, Version: r.version,
 		}
 		if r.walOp == wal.OpDelete {
 			n.pending[r.key] = pendingKV{rev: newRev, deleted: true}
@@ -611,7 +612,7 @@ func (n *Node) prepareTxn(req TxnRequest) (wal.Entry, bool, map[string]struct{},
 				kv: &istore.KeyValue{
 					Key: r.key, Value: r.value, Revision: newRev,
 					CreateRevision: cr, PrevRevision: r.prevRevision,
-					Lease: r.lease,
+					Version: r.version, Lease: r.lease,
 				},
 			}
 		}
@@ -781,7 +782,7 @@ func kvToMsg(kv *KeyValue) *peer.KVMsg {
 	return &peer.KVMsg{
 		Key: kv.Key, Value: kv.Value, Revision: kv.Revision,
 		CreateRevision: kv.CreateRevision, PrevRevision: kv.PrevRevision,
-		Lease: kv.Lease,
+		Version: kv.Version, Lease: kv.Lease,
 	}
 }
 
@@ -792,6 +793,23 @@ func msgToKV(m *peer.KVMsg) *KeyValue {
 	return &KeyValue{
 		Key: m.Key, Value: m.Value, Revision: m.Revision,
 		CreateRevision: m.CreateRevision, PrevRevision: m.PrevRevision,
-		Lease: m.Lease,
+		Version: m.Version, Lease: m.Lease,
 	}
+}
+
+func kvVersion(kv *istore.KeyValue) int64 {
+	if kv == nil {
+		return 0
+	}
+	if kv.Version > 0 {
+		return kv.Version
+	}
+	return 1
+}
+
+func nextPutVersion(existing *istore.KeyValue) int64 {
+	if existing == nil {
+		return 1
+	}
+	return kvVersion(existing) + 1
 }

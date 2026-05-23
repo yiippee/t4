@@ -81,6 +81,25 @@ jobs:
       - name: Test (integration)
         run: go test -short -timeout 360s -count=1 ./tests/integration
 
+  test-apiserver-linux:
+    name: Test Kubernetes apiserver storage (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Test Kubernetes apiserver storage
+        run: make test-apiserver
+
   minio-cli-smoke:
     name: MinIO CLI Smoke
     runs-on: ubuntu-latest

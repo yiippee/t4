@@ -239,13 +239,17 @@ func fromEtcdRevision(rev int64) int64 {
 // must match the header revision produced by header() for the same underlying
 // state so that clients comparing header rev to KV rev see a consistent world.
 func kvToProto(kv *t4.KeyValue) *mvccpb.KeyValue {
+	version := kv.Version
+	if version <= 0 {
+		version = 1
+	}
 	return &mvccpb.KeyValue{
 		Key:            []byte(kv.Key),
 		Value:          kv.Value,
 		ModRevision:    toEtcdRevision(kv.Revision),
 		CreateRevision: toEtcdRevision(kv.CreateRevision),
 		Lease:          kv.Lease,
-		Version:        1,
+		Version:        version,
 	}
 }
 

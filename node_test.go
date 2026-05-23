@@ -90,11 +90,46 @@ func TestNodePutUpdatesRevision(t *testing.T) {
 	if kv.CreateRevision != 1 {
 		t.Errorf("CreateRevision should stay 1, got %d", kv.CreateRevision)
 	}
+	if kv.Version != 2 {
+		t.Errorf("Version: want 2 got %d", kv.Version)
+	}
 	if kv.PrevRevision != 1 {
 		t.Errorf("PrevRevision: want 1 got %d", kv.PrevRevision)
 	}
 	if string(kv.Value) != "v2" {
 		t.Errorf("Value: want v2 got %q", kv.Value)
+	}
+}
+
+func TestNodeVersionCreateUpdateDeleteRecreate(t *testing.T) {
+	n := openNode(t)
+	c := ctx(t)
+
+	if _, err := n.Put(c, "k", []byte("v1"), 0); err != nil {
+		t.Fatalf("Put v1: %v", err)
+	}
+	kv, _ := n.Get("k")
+	if kv.Version != 1 {
+		t.Fatalf("initial Version: want 1 got %d", kv.Version)
+	}
+
+	if _, err := n.Put(c, "k", []byte("v2"), 0); err != nil {
+		t.Fatalf("Put v2: %v", err)
+	}
+	kv, _ = n.Get("k")
+	if kv.Version != 2 {
+		t.Fatalf("updated Version: want 2 got %d", kv.Version)
+	}
+
+	if _, err := n.Delete(c, "k"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := n.Put(c, "k", []byte("v3"), 0); err != nil {
+		t.Fatalf("Put v3: %v", err)
+	}
+	kv, _ = n.Get("k")
+	if kv.Version != 1 {
+		t.Fatalf("recreated Version: want 1 got %d", kv.Version)
 	}
 }
 
@@ -516,7 +551,7 @@ func TestNodeRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reopen: %v", err)
 	}
-	defer n2.Close()
+	defer func() { _ = n2.Close() }()
 
 	if n2.CurrentRevision() != rev {
 		t.Errorf("CurrentRevision after restart: want %d got %d", rev, n2.CurrentRevision())
@@ -527,6 +562,40 @@ func TestNodeRestart(t *testing.T) {
 	}
 	if string(kv.Value) != "yes" {
 		t.Errorf("value after restart: want yes got %q", kv.Value)
+	}
+}
+
+func TestNodeVersionSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	obj := object.NewMem()
+	cfg := t4.Config{DataDir: dir, ObjectStore: obj}
+
+	n, err := t4.Open(cfg)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	c := ctx(t)
+	if _, err := n.Put(c, "versioned", []byte("v1"), 0); err != nil {
+		t.Fatalf("Put v1: %v", err)
+	}
+	if _, err := n.Put(c, "versioned", []byte("v2"), 0); err != nil {
+		t.Fatalf("Put v2: %v", err)
+	}
+	if err := n.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	n2, err := t4.Open(cfg)
+	if err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	defer func() { _ = n2.Close() }()
+	kv, err := n2.Get("versioned")
+	if err != nil || kv == nil {
+		t.Fatalf("Get after restart: err=%v kv=%v", err, kv)
+	}
+	if kv.Version != 2 {
+		t.Fatalf("Version after restart: want 2 got %d", kv.Version)
 	}
 }
 
@@ -607,6 +676,36 @@ func TestTxnConditionSucceeded(t *testing.T) {
 	}
 	if aKV != nil && bKV != nil && aKV.Revision != bKV.Revision {
 		t.Errorf("a and b must share revision: a=%d b=%d", aKV.Revision, bKV.Revision)
+	}
+}
+
+func TestTxnVersionCondition(t *testing.T) {
+	n := openNode(t)
+	c := ctx(t)
+
+	if _, err := n.Put(c, "a", []byte("v1"), 0); err != nil {
+		t.Fatalf("Put v1: %v", err)
+	}
+	if _, err := n.Put(c, "a", []byte("v2"), 0); err != nil {
+		t.Fatalf("Put v2: %v", err)
+	}
+
+	resp, err := n.Txn(c, t4.TxnRequest{
+		Conditions: []t4.TxnCondition{
+			{Key: "a", Target: t4.TxnCondVersion, Result: t4.TxnCondEqual, Version: 2},
+		},
+		Success: []t4.TxnOp{{Type: t4.TxnPut, Key: "result", Value: []byte("success")}},
+		Failure: []t4.TxnOp{{Type: t4.TxnPut, Key: "result", Value: []byte("failure")}},
+	})
+	if err != nil {
+		t.Fatalf("Txn: %v", err)
+	}
+	if !resp.Succeeded {
+		t.Fatal("Txn: want Succeeded=true")
+	}
+	kv, _ := n.Get("result")
+	if kv == nil || string(kv.Value) != "success" {
+		t.Fatalf("result: want success got %v", kv)
 	}
 }
 
@@ -706,14 +805,14 @@ func TestTxnSurvivesRestart(t *testing.T) {
 		t.Fatalf("Txn: %v", err)
 	}
 	txnRev := resp.Revision
-	n.Close()
+	_ = n.Close()
 
 	// Reopen and verify both keys survived at the same revision.
 	n2, err := t4.Open(cfg)
 	if err != nil {
 		t.Fatalf("Reopen: %v", err)
 	}
-	defer n2.Close()
+	defer func() { _ = n2.Close() }()
 
 	for key, want := range map[string]string{"p": "alpha", "q": "beta"} {
 		kv, err := n2.Get(key)
