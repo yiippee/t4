@@ -20,8 +20,13 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 	readRev := fromEtcdRevision(r.Revision)
 	header := func() *etcdserverpb.ResponseHeader { return s.rangeHeader(readRev) }
 
-	if r.Revision > 0 && readRev == 0 {
-		return &etcdserverpb.RangeResponse{Header: s.headerAt(0)}, nil
+	if r.Revision > 0 {
+		if compactRev := s.node.CompactRevision(); compactRev > 0 && readRev < compactRev {
+			return nil, rpctypes.ErrGRPCCompacted
+		}
+		if readRev == 0 {
+			return &etcdserverpb.RangeResponse{Header: s.headerAt(0)}, nil
+		}
 	}
 
 	// A read is linearizable when the client requests it AND the server is not
@@ -387,17 +392,8 @@ func convertCompare(cmp *etcdserverpb.Compare) (t4.TxnCondition, error) {
 		c.Target = t4.TxnCondMod
 		c.ModRevision = fromEtcdRevision(cmp.GetModRevision())
 	case etcdserverpb.Compare_VERSION:
-		// t4 does not track per-key write counts; VERSION is treated as a binary
-		// presence flag (0 = absent, non-zero = present).  Only comparisons against
-		// zero are correct: VERSION == 0 (key absent) and VERSION != 0 (key present).
-		// Any non-zero RHS would produce silently wrong results for keys that have
-		// been updated more than once, so reject them.
-		if cmp.GetVersion() != 0 {
-			return t4.TxnCondition{}, status.Error(codes.Unimplemented,
-				"VERSION comparisons against non-zero values are not supported; use ModRevision instead")
-		}
 		c.Target = t4.TxnCondVersion
-		c.Version = 0
+		c.Version = cmp.GetVersion()
 	case etcdserverpb.Compare_CREATE:
 		c.Target = t4.TxnCondCreate
 		c.CreateRevision = fromEtcdRevision(cmp.GetCreateRevision())

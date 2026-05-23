@@ -819,22 +819,48 @@ func TestTxnMultiKeyDeleteAccuracy(t *testing.T) {
 	}
 }
 
-// TestTxnVersionNonZeroRejected verifies that VERSION comparisons against a
-// non-zero value return an error rather than silently producing wrong results.
-func TestTxnVersionNonZeroRejected(t *testing.T) {
+func TestTxnVersionCompareTracksUpdates(t *testing.T) {
 	_, cli := newCompatNode(t)
 	ctx := context.Background()
 
 	if _, err := cli.Put(ctx, "/txn/version/key", "v"); err != nil {
-		t.Fatalf("Put: %v", err)
+		t.Fatalf("Put v1: %v", err)
+	}
+	if _, err := cli.Put(ctx, "/txn/version/key", "v2"); err != nil {
+		t.Fatalf("Put v2: %v", err)
 	}
 
-	_, err := cli.Txn(ctx).
+	resp, err := cli.Get(ctx, "/txn/version/key")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(resp.Kvs) != 1 || resp.Kvs[0].Version != 2 {
+		t.Fatalf("Version after update: want 2 got %+v", resp.Kvs)
+	}
+
+	txnResp, err := cli.Txn(ctx).
 		If(clientv3.Compare(clientv3.Version("/txn/version/key"), "=", 2)).
-		Then(clientv3.OpPut("/txn/version/key", "bad")).
+		Then(clientv3.OpPut("/txn/version/result", "ok")).
 		Commit()
-	if err == nil {
-		t.Fatal("expected error for VERSION == 2, got nil")
+	if err != nil {
+		t.Fatalf("Txn: %v", err)
+	}
+	if !txnResp.Succeeded {
+		t.Fatal("Txn: want Succeeded=true")
+	}
+
+	if _, err := cli.Delete(ctx, "/txn/version/key"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := cli.Put(ctx, "/txn/version/key", "recreated"); err != nil {
+		t.Fatalf("Put recreated: %v", err)
+	}
+	resp, err = cli.Get(ctx, "/txn/version/key")
+	if err != nil {
+		t.Fatalf("Get recreated: %v", err)
+	}
+	if len(resp.Kvs) != 1 || resp.Kvs[0].Version != 1 {
+		t.Fatalf("Version after recreate: want 1 got %+v", resp.Kvs)
 	}
 }
 

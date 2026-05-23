@@ -16,7 +16,7 @@ func TestEntryRoundtrip(t *testing.T) {
 			e: Entry{
 				Revision: 1, Term: 1, Op: OpCreate,
 				Key: "foo", Value: []byte("bar"), Lease: 0,
-				CreateRevision: 1,
+				CreateRevision: 1, Version: 1,
 			},
 		},
 		{
@@ -24,14 +24,14 @@ func TestEntryRoundtrip(t *testing.T) {
 			e: Entry{
 				Revision: 5, Term: 2, Op: OpUpdate,
 				Key: "foo", Value: []byte("baz"), Lease: 42,
-				CreateRevision: 1, PrevRevision: 3,
+				CreateRevision: 1, PrevRevision: 3, Version: 2,
 			},
 		},
 		{
 			name: "delete",
 			e: Entry{
 				Revision: 6, Term: 2, Op: OpDelete,
-				Key: "foo", CreateRevision: 1, PrevRevision: 5,
+				Key: "foo", CreateRevision: 1, PrevRevision: 5, Version: 2,
 			},
 		},
 		{
@@ -138,5 +138,35 @@ func assertEntryEqual(t *testing.T, want, got *Entry) {
 	}
 	if got.PrevRevision != want.PrevRevision {
 		t.Errorf("PrevRevision: want %d got %d", want.PrevRevision, got.PrevRevision)
+	}
+	if got.Version != want.Version {
+		t.Errorf("Version: want %d got %d", want.Version, got.Version)
+	}
+}
+
+func TestTxnOpsRoundtripWithVersion(t *testing.T) {
+	want := []TxnSubOp{
+		{Op: OpCreate, Key: "a", Value: []byte("1"), CreateRevision: 1, Version: 1},
+		{Op: OpUpdate, Key: "b", Value: []byte("2"), Lease: 9, CreateRevision: 1, PrevRevision: 3, Version: 4},
+		{Op: OpDelete, Key: "c", CreateRevision: 2, PrevRevision: 5, Version: 3},
+	}
+
+	got, err := DecodeTxnOps(EncodeTxnOps(want))
+	if err != nil {
+		t.Fatalf("DecodeTxnOps: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("len: want %d got %d", len(want), len(got))
+	}
+	for i := range want {
+		if got[i].Op != want[i].Op ||
+			got[i].Key != want[i].Key ||
+			!bytes.Equal(got[i].Value, want[i].Value) ||
+			got[i].Lease != want[i].Lease ||
+			got[i].CreateRevision != want[i].CreateRevision ||
+			got[i].PrevRevision != want[i].PrevRevision ||
+			got[i].Version != want[i].Version {
+			t.Fatalf("op %d: want %+v got %+v", i, want[i], got[i])
+		}
 	}
 }

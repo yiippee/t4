@@ -39,6 +39,7 @@ type Entry struct {
 	Lease          int64
 	CreateRevision int64 // meaningful for Update/Delete
 	PrevRevision   int64 // meaningful for Update/Delete
+	Version        int64 // etcd-style per-key modification count
 }
 
 // Sequence returns the identity used for WAL ordering and peer-stream ACKs.
@@ -58,10 +59,16 @@ type TxnSubOp struct {
 	Lease          int64
 	CreateRevision int64
 	PrevRevision   int64
+	Version        int64
 }
 
-// txnSubOpFixedSize: op(1) + lease(8) + createRev(8) + prevRev(8) + keyLen(4) + valLen(4) = 33
-const txnSubOpFixedSize = 33
+// txnSubOpFixedSizeV1: op(1) + lease(8) + createRev(8) + prevRev(8) + keyLen(4) + valLen(4) = 33
+// txnSubOpFixedSize: txnSubOpFixedSizeV1 + version(8) = 41
+const (
+	txnOpsVersionedFlag = uint32(1 << 31)
+	txnSubOpFixedSizeV1 = 33
+	txnSubOpFixedSize   = txnSubOpFixedSizeV1 + 8
+)
 
 // EncodeTxnOps encodes a slice of TxnSubOp into a byte slice for storage in
 // an OpTxn Entry's Value field.
@@ -71,7 +78,7 @@ func EncodeTxnOps(ops []TxnSubOp) []byte {
 		total += txnSubOpFixedSize + len(ops[i].Key) + len(ops[i].Value)
 	}
 	buf := make([]byte, total)
-	binary.BigEndian.PutUint32(buf[0:4], uint32(len(ops)))
+	binary.BigEndian.PutUint32(buf[0:4], txnOpsVersionedFlag|uint32(len(ops)))
 	off := 4
 	for i := range ops {
 		o := &ops[i]
@@ -79,8 +86,9 @@ func EncodeTxnOps(ops []TxnSubOp) []byte {
 		binary.BigEndian.PutUint64(buf[off+1:], uint64(o.Lease))
 		binary.BigEndian.PutUint64(buf[off+9:], uint64(o.CreateRevision))
 		binary.BigEndian.PutUint64(buf[off+17:], uint64(o.PrevRevision))
-		binary.BigEndian.PutUint32(buf[off+25:], uint32(len(o.Key)))
-		binary.BigEndian.PutUint32(buf[off+29:], uint32(len(o.Value)))
+		binary.BigEndian.PutUint64(buf[off+25:], uint64(o.Version))
+		binary.BigEndian.PutUint32(buf[off+33:], uint32(len(o.Key)))
+		binary.BigEndian.PutUint32(buf[off+37:], uint32(len(o.Value)))
 		off += txnSubOpFixedSize
 		copy(buf[off:], o.Key)
 		off += len(o.Key)
@@ -95,11 +103,17 @@ func DecodeTxnOps(b []byte) ([]TxnSubOp, error) {
 	if len(b) < 4 {
 		return nil, fmt.Errorf("wal: txn ops payload too short (%d bytes)", len(b))
 	}
-	count := int(binary.BigEndian.Uint32(b[0:4]))
+	rawCount := binary.BigEndian.Uint32(b[0:4])
+	versioned := rawCount&txnOpsVersionedFlag != 0
+	count := int(rawCount &^ txnOpsVersionedFlag)
+	fixedSize := txnSubOpFixedSizeV1
+	if versioned {
+		fixedSize = txnSubOpFixedSize
+	}
 	ops := make([]TxnSubOp, 0, count)
 	off := 4
 	for i := 0; i < count; i++ {
-		if len(b)-off < txnSubOpFixedSize {
+		if len(b)-off < fixedSize {
 			return nil, fmt.Errorf("wal: txn sub-op %d header truncated", i)
 		}
 		o := TxnSubOp{}
@@ -107,9 +121,14 @@ func DecodeTxnOps(b []byte) ([]TxnSubOp, error) {
 		o.Lease = int64(binary.BigEndian.Uint64(b[off+1:]))
 		o.CreateRevision = int64(binary.BigEndian.Uint64(b[off+9:]))
 		o.PrevRevision = int64(binary.BigEndian.Uint64(b[off+17:]))
-		keyLen := int(binary.BigEndian.Uint32(b[off+25:]))
-		valLen := int(binary.BigEndian.Uint32(b[off+29:]))
-		off += txnSubOpFixedSize
+		keyLenOffset := off + 25
+		if versioned {
+			o.Version = int64(binary.BigEndian.Uint64(b[off+25:]))
+			keyLenOffset = off + 33
+		}
+		keyLen := int(binary.BigEndian.Uint32(b[keyLenOffset:]))
+		valLen := int(binary.BigEndian.Uint32(b[keyLenOffset+4:]))
+		off += fixedSize
 		if len(b)-off < keyLen+valLen {
 			return nil, fmt.Errorf("wal: txn sub-op %d payload truncated (need %d, have %d)", i, keyLen+valLen, len(b)-off)
 		}
@@ -139,7 +158,8 @@ func DecodeTxnOps(b []byte) ([]TxnSubOp, error) {
 //	[8:  lease           int64  BE]
 //	[8:  create_revision int64  BE]
 //	[8:  prev_revision   int64  BE]
-//	[8:  id              int64  BE] // optional in v1-compatible readers
+//	[8:  id              int64  BE] // v2+
+//	[8:  version         int64  BE] // v2+
 //	[4:  key_len         uint32 BE]
 //	[4:  val_len         uint32 BE]
 //	[key_len: key bytes]
@@ -147,6 +167,7 @@ func DecodeTxnOps(b []byte) ([]TxnSubOp, error) {
 const (
 	entryFixedSizeV1 = 1 + 8 + 8 + 8 + 8 + 8 + 4 + 4 // 49 bytes
 	entryFixedSize   = entryFixedSizeV1 + 8          // 57 bytes
+	entryFixedSizeV3 = entryFixedSize + 8            // 65 bytes
 )
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
@@ -198,7 +219,7 @@ func ReadEntryVersion(r io.Reader, version int) (*Entry, error) {
 }
 
 func marshalEntry(e *Entry) []byte {
-	buf := make([]byte, entryFixedSize+len(e.Key)+len(e.Value))
+	buf := make([]byte, entryFixedSizeV3+len(e.Key)+len(e.Value))
 	buf[0] = byte(e.Op)
 	binary.BigEndian.PutUint64(buf[1:9], uint64(e.Revision))
 	binary.BigEndian.PutUint64(buf[9:17], e.Term)
@@ -206,10 +227,11 @@ func marshalEntry(e *Entry) []byte {
 	binary.BigEndian.PutUint64(buf[25:33], uint64(e.CreateRevision))
 	binary.BigEndian.PutUint64(buf[33:41], uint64(e.PrevRevision))
 	binary.BigEndian.PutUint64(buf[41:49], uint64(e.Sequence()))
-	binary.BigEndian.PutUint32(buf[49:53], uint32(len(e.Key)))
-	binary.BigEndian.PutUint32(buf[53:57], uint32(len(e.Value)))
-	copy(buf[57:], e.Key)
-	copy(buf[57+len(e.Key):], e.Value)
+	binary.BigEndian.PutUint64(buf[49:57], uint64(e.Version))
+	binary.BigEndian.PutUint32(buf[57:61], uint32(len(e.Key)))
+	binary.BigEndian.PutUint32(buf[61:65], uint32(len(e.Value)))
+	copy(buf[65:], e.Key)
+	copy(buf[65+len(e.Key):], e.Value)
 	return buf
 }
 
@@ -230,11 +252,12 @@ func unmarshalEntryVersion(b []byte, version int) (*Entry, error) {
 	e.PrevRevision = int64(binary.BigEndian.Uint64(b[33:41]))
 	fixedSize := entryFixedSizeV1
 	if version >= 2 {
-		if len(b) < entryFixedSize {
+		if len(b) < entryFixedSizeV3 {
 			return nil, fmt.Errorf("wal: v2 entry too short: %d bytes", len(b))
 		}
 		e.ID = int64(binary.BigEndian.Uint64(b[41:49]))
-		fixedSize = entryFixedSize
+		e.Version = int64(binary.BigEndian.Uint64(b[49:57]))
+		fixedSize = entryFixedSizeV3
 	}
 	keyLen := int(binary.BigEndian.Uint32(b[fixedSize-8 : fixedSize-4]))
 	valLen := int(binary.BigEndian.Uint32(b[fixedSize-4 : fixedSize]))

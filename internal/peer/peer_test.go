@@ -35,7 +35,7 @@ func makeEntry(rev int64) *wal.Entry {
 	return &wal.Entry{
 		Revision: rev, Term: 1, Op: wal.OpCreate,
 		Key: fmt.Sprintf("key-%d", rev), Value: []byte(fmt.Sprintf("val-%d", rev)),
-		CreateRevision: rev,
+		CreateRevision: rev, Version: 1,
 	}
 }
 
@@ -74,6 +74,9 @@ func TestStreamDelivery(t *testing.T) {
 		case e := <-received:
 			if e.Revision != i {
 				t.Errorf("event %d: got revision %d", i, e.Revision)
+			}
+			if e.Version != 1 {
+				t.Errorf("event %d: got version %d", i, e.Version)
 			}
 		case <-ctx.Done():
 			t.Fatalf("timeout waiting for entry %d", i)

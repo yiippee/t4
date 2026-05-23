@@ -57,7 +57,7 @@ func IsLeaderShutdown(err error) bool {
 // Codec encodes peer gRPC messages. Hot-path messages (WalEntryMsg, AckMsg)
 // use a compact binary format; all other messages fall back to JSON.
 //
-// WalEntryMsg wire layout (little-endian, 76-byte fixed header):
+// WalEntryMsg wire layout (little-endian, 84-byte fixed header):
 //
 //	[revision  : int64  ]  @0
 //	[term      : uint64 ]  @8
@@ -71,9 +71,10 @@ func IsLeaderShutdown(err error) bool {
 //	[commitRev   : int64  ]  @48
 //	[commitStart : int64  ]  @56
 //	[id          : int64  ]  @64
-//	[key bytes   ]           @72
-//	[valueLen    : uint32 ]  @72+keyLen
-//	[value bytes ]           @76+keyLen
+//	[version     : int64  ]  @72
+//	[key bytes   ]           @80
+//	[valueLen    : uint32 ]  @80+keyLen
+//	[value bytes ]           @84+keyLen
 //
 // AckMsg wire layout:
 //
@@ -110,7 +111,9 @@ func (Codec) Unmarshal(data []byte, v interface{}) error {
 	}
 }
 
-const walEntryMsgFixedSize = 76
+const (
+	walEntryMsgFixedSize = 84
+)
 
 func marshalWalEntryMsg(m *WalEntryMsg) ([]byte, error) {
 	kl := len(m.Key)
@@ -132,9 +135,10 @@ func marshalWalEntryMsg(m *WalEntryMsg) ([]byte, error) {
 	binary.LittleEndian.PutUint64(buf[48:], uint64(m.CommitRevision))
 	binary.LittleEndian.PutUint64(buf[56:], uint64(m.CommitStartRevision))
 	binary.LittleEndian.PutUint64(buf[64:], uint64(m.ID))
-	copy(buf[72:], m.Key)
-	binary.LittleEndian.PutUint32(buf[72+kl:], uint32(vl))
-	copy(buf[76+kl:], m.Value)
+	binary.LittleEndian.PutUint64(buf[72:], uint64(m.Version))
+	copy(buf[80:], m.Key)
+	binary.LittleEndian.PutUint32(buf[80+kl:], uint32(vl))
+	copy(buf[84+kl:], m.Value)
 	return buf, nil
 }
 
@@ -154,16 +158,17 @@ func unmarshalWalEntryMsg(data []byte, m *WalEntryMsg) error {
 	m.CommitRevision = int64(binary.LittleEndian.Uint64(data[48:]))
 	m.CommitStartRevision = int64(binary.LittleEndian.Uint64(data[56:]))
 	m.ID = int64(binary.LittleEndian.Uint64(data[64:]))
+	m.Version = int64(binary.LittleEndian.Uint64(data[72:]))
 	if len(data) < walEntryMsgFixedSize+kl {
 		return fmt.Errorf("peer: WalEntryMsg truncated at key (need %d have %d)", walEntryMsgFixedSize+kl, len(data))
 	}
-	m.Key = string(data[72 : 72+kl])
-	vl := int(binary.LittleEndian.Uint32(data[72+kl:]))
+	m.Key = string(data[80 : 80+kl])
+	vl := int(binary.LittleEndian.Uint32(data[80+kl:]))
 	if len(data) < walEntryMsgFixedSize+kl+vl {
 		return fmt.Errorf("peer: WalEntryMsg truncated at value (need %d have %d)", walEntryMsgFixedSize+kl+vl, len(data))
 	}
 	m.Value = make([]byte, vl)
-	copy(m.Value, data[76+kl:])
+	copy(m.Value, data[84+kl:])
 	return nil
 }
 
@@ -199,6 +204,7 @@ type WalEntryMsg struct {
 	Lease               int64  `json:"lease"`
 	CreateRevision      int64  `json:"create_revision"`
 	PrevRevision        int64  `json:"prev_revision"`
+	Version             int64  `json:"version,omitempty"`
 	CommitRevision      int64  `json:"commit_revision,omitempty"`
 	CommitStartRevision int64  `json:"commit_start_revision,omitempty"`
 	Commit              bool   `json:"commit,omitempty"`
@@ -209,7 +215,7 @@ func EntryToMsg(e *wal.Entry) *WalEntryMsg {
 	return &WalEntryMsg{
 		ID: e.Sequence(), Revision: e.Revision, Term: e.Term, Op: uint8(e.Op),
 		Key: e.Key, Value: e.Value, Lease: e.Lease,
-		CreateRevision: e.CreateRevision, PrevRevision: e.PrevRevision,
+		CreateRevision: e.CreateRevision, PrevRevision: e.PrevRevision, Version: e.Version,
 	}
 }
 
@@ -217,7 +223,7 @@ func MsgToEntry(m *WalEntryMsg) wal.Entry {
 	return wal.Entry{
 		ID: m.ID, Revision: m.Revision, Term: m.Term, Op: wal.Op(m.Op),
 		Key: m.Key, Value: m.Value, Lease: m.Lease,
-		CreateRevision: m.CreateRevision, PrevRevision: m.PrevRevision,
+		CreateRevision: m.CreateRevision, PrevRevision: m.PrevRevision, Version: m.Version,
 	}
 }
 
@@ -243,6 +249,7 @@ type KVMsg struct {
 	Revision       int64  `json:"revision"`
 	CreateRevision int64  `json:"create_revision"`
 	PrevRevision   int64  `json:"prev_revision"`
+	Version        int64  `json:"version,omitempty"`
 	Lease          int64  `json:"lease"`
 }
 
