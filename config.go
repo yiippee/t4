@@ -61,7 +61,7 @@ type WALWriter interface {
 	ReplayLocal(db wal.RecoveryStore, afterRev int64) error
 	Append(e *wal.Entry) error
 	AppendBatch(ctx context.Context, entries []*wal.Entry) error
-	SealAndFlush(nextRev int64) error
+	SealAndFlush(nextSeq int64) error
 	Close() error
 }
 

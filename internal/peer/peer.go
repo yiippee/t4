@@ -57,7 +57,7 @@ func IsLeaderShutdown(err error) bool {
 // Codec encodes peer gRPC messages. Hot-path messages (WalEntryMsg, AckMsg)
 // use a compact binary format; all other messages fall back to JSON.
 //
-// WalEntryMsg wire layout (little-endian, 68-byte fixed header):
+// WalEntryMsg wire layout (little-endian, 76-byte fixed header):
 //
 //	[revision  : int64  ]  @0
 //	[term      : uint64 ]  @8
@@ -70,9 +70,10 @@ func IsLeaderShutdown(err error) bool {
 //	[keyLen      : uint32 ]  @44
 //	[commitRev   : int64  ]  @48
 //	[commitStart : int64  ]  @56
-//	[key bytes   ]           @64
-//	[valueLen    : uint32 ]  @64+keyLen
-//	[value bytes ]           @68+keyLen
+//	[id          : int64  ]  @64
+//	[key bytes   ]           @72
+//	[valueLen    : uint32 ]  @72+keyLen
+//	[value bytes ]           @76+keyLen
 //
 // AckMsg wire layout:
 //
@@ -109,7 +110,7 @@ func (Codec) Unmarshal(data []byte, v interface{}) error {
 	}
 }
 
-const walEntryMsgFixedSize = 68
+const walEntryMsgFixedSize = 76
 
 func marshalWalEntryMsg(m *WalEntryMsg) ([]byte, error) {
 	kl := len(m.Key)
@@ -130,9 +131,10 @@ func marshalWalEntryMsg(m *WalEntryMsg) ([]byte, error) {
 	binary.LittleEndian.PutUint32(buf[44:], uint32(kl))
 	binary.LittleEndian.PutUint64(buf[48:], uint64(m.CommitRevision))
 	binary.LittleEndian.PutUint64(buf[56:], uint64(m.CommitStartRevision))
-	copy(buf[64:], m.Key)
-	binary.LittleEndian.PutUint32(buf[64+kl:], uint32(vl))
-	copy(buf[68+kl:], m.Value)
+	binary.LittleEndian.PutUint64(buf[64:], uint64(m.ID))
+	copy(buf[72:], m.Key)
+	binary.LittleEndian.PutUint32(buf[72+kl:], uint32(vl))
+	copy(buf[76+kl:], m.Value)
 	return buf, nil
 }
 
@@ -151,39 +153,44 @@ func unmarshalWalEntryMsg(data []byte, m *WalEntryMsg) error {
 	kl := int(binary.LittleEndian.Uint32(data[44:]))
 	m.CommitRevision = int64(binary.LittleEndian.Uint64(data[48:]))
 	m.CommitStartRevision = int64(binary.LittleEndian.Uint64(data[56:]))
+	m.ID = int64(binary.LittleEndian.Uint64(data[64:]))
 	if len(data) < walEntryMsgFixedSize+kl {
 		return fmt.Errorf("peer: WalEntryMsg truncated at key (need %d have %d)", walEntryMsgFixedSize+kl, len(data))
 	}
-	m.Key = string(data[64 : 64+kl])
-	vl := int(binary.LittleEndian.Uint32(data[64+kl:]))
+	m.Key = string(data[72 : 72+kl])
+	vl := int(binary.LittleEndian.Uint32(data[72+kl:]))
 	if len(data) < walEntryMsgFixedSize+kl+vl {
 		return fmt.Errorf("peer: WalEntryMsg truncated at value (need %d have %d)", walEntryMsgFixedSize+kl+vl, len(data))
 	}
 	m.Value = make([]byte, vl)
-	copy(m.Value, data[68+kl:])
+	copy(m.Value, data[76+kl:])
 	return nil
 }
 
 // ── WAL stream message types ──────────────────────────────────────────────────
 
 // FollowRequest is the single message sent by a follower to open a WAL stream.
+// FromRevision is a legacy field name; after the sequence/revision split it
+// carries the next WAL sequence requested by the follower.
 type FollowRequest struct {
 	FromRevision int64  `json:"from_revision"`
 	NodeID       string `json:"node_id"`
 }
 
 // AckMsg is sent by a follower to the leader on the bidi Follow stream to
-// acknowledge that it has durably written all entries up to Revision to its
-// local WAL. The leader waits for ACKs from all connected followers before
+// acknowledge that it has durably written all entries up to the sequence carried
+// in Revision. The leader waits for ACKs from all connected followers before
 // committing each batch to Pebble (quorum commit).
 type AckMsg struct {
 	Revision int64 `json:"revision"`
 }
 
-// WalEntryMsg is the wire representation of a wal.Entry.
+// WalEntryMsg is the wire representation of a wal.Entry. Receivers must use ID
+// for ordering/ACK semantics and Revision only as the user-visible revision.
 // Shutdown is a special flag: when true the leader is shutting down gracefully
 // and the follower should start a TakeOver election immediately.
 type WalEntryMsg struct {
+	ID                  int64  `json:"id,omitempty"`
 	Revision            int64  `json:"revision"`
 	Term                uint64 `json:"term"`
 	Op                  uint8  `json:"op"`
@@ -200,7 +207,7 @@ type WalEntryMsg struct {
 
 func EntryToMsg(e *wal.Entry) *WalEntryMsg {
 	return &WalEntryMsg{
-		Revision: e.Revision, Term: e.Term, Op: uint8(e.Op),
+		ID: e.Sequence(), Revision: e.Revision, Term: e.Term, Op: uint8(e.Op),
 		Key: e.Key, Value: e.Value, Lease: e.Lease,
 		CreateRevision: e.CreateRevision, PrevRevision: e.PrevRevision,
 	}
@@ -208,7 +215,7 @@ func EntryToMsg(e *wal.Entry) *WalEntryMsg {
 
 func MsgToEntry(m *WalEntryMsg) wal.Entry {
 	return wal.Entry{
-		Revision: m.Revision, Term: m.Term, Op: wal.Op(m.Op),
+		ID: m.ID, Revision: m.Revision, Term: m.Term, Op: wal.Op(m.Op),
 		Key: m.Key, Value: m.Value, Lease: m.Lease,
 		CreateRevision: m.CreateRevision, PrevRevision: m.PrevRevision,
 	}

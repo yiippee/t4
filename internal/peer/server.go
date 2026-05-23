@@ -39,16 +39,16 @@ type Server struct {
 	buf             *entryBuffer
 	pending         []*wal.Entry
 	followers       map[string]chan *WalEntryMsg
-	followerAckRevs map[string]int64 // last ACK'd revision per follower
-	maxBroadcastRev int64            // highest revision sent via Broadcast
+	followerAckRevs map[string]int64 // last ACK'd sequence per follower
+	maxBroadcastRev int64            // highest sequence sent via Broadcast
 	forwardHandler  ForwardHandler
 
 	// ackNotify is a buffered-1 channel. A non-blocking send is made whenever
 	// any follower ACKs an entry or disconnects, waking WaitForFollowers.
 	ackNotify chan struct{}
 
-	// startRev is the first revision this leader will ever write — i.e.
-	// db.CurrentRevision()+1 at the moment becomeLeader ran.  A follower that
+	// startRev is the first sequence this leader will ever write — i.e.
+	// db.LastSequence()+1 at the moment becomeLeader ran.  A follower that
 	// connects with FromRevision < startRev has missed entries that are only
 	// in S3 (never in this leader's ring buffer) and must re-sync from S3
 	// before it can consume the live stream.
@@ -96,8 +96,8 @@ func (s *Server) ConnectedFollowers() int {
 	return len(s.followers)
 }
 
-// SetStartRev records the first revision this leader owns — callers pass
-// db.CurrentRevision()+1 immediately after becomeLeader completes its S3
+// SetStartRev records the first sequence this leader owns — callers pass
+// db.LastSequence()+1 immediately after becomeLeader completes its S3
 // replay.  Followers that connect with FromRevision < startRev are missing
 // entries that will never appear in the ring buffer; they must re-sync.
 func (s *Server) SetStartRev(rev int64) {
@@ -128,7 +128,7 @@ func (s *Server) Broadcast(e *wal.Entry) {
 			// reconnects from its last applied revision, re-fetching the gap
 			// from the ring buffer. Silently dropping the entry and continuing
 			// would leave the follower with a permanent hole.
-			s.log.Warnf("peer: follower %q too slow — disconnecting to force resync at rev=%d", id, e.Revision)
+			s.log.Warnf("peer: follower %q too slow — disconnecting to force resync at seq=%d", id, e.Sequence())
 			toKick = append(toKick, id)
 		}
 	}
@@ -147,13 +147,13 @@ func (s *Server) BroadcastCommit(startRev, rev int64) {
 	keep := s.pending[:0]
 	for _, e := range s.pending {
 		switch {
-		case e.Revision < startRev:
+		case e.Sequence() < startRev:
 			// An older uncommitted entry was superseded by a later committed
 			// range. Drop it so reconnect snapshots never replay aborted writes.
-		case e.Revision <= rev:
+		case e.Sequence() <= rev:
 			s.buf.push(e)
-			if e.Revision > s.maxBroadcastRev {
-				s.maxBroadcastRev = e.Revision
+			if e.Sequence() > s.maxBroadcastRev {
+				s.maxBroadcastRev = e.Sequence()
 			}
 		default:
 			keep = append(keep, e)
@@ -258,7 +258,7 @@ func requiredFollowerACKs(connected int, mode WaitMode) int {
 	}
 }
 
-// MinFollowerAppliedRev returns the minimum ACK'd revision across all currently
+// MinFollowerAppliedRev returns the minimum ACK'd sequence across all currently
 // connected followers. Used by the leader to determine the safe WAL GC boundary:
 // WAL segments are only deleted once all connected followers have applied them.
 //
@@ -304,7 +304,7 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 	s.followers[req.NodeID] = ch
 	var maxSent int64
 	if len(snapshot) > 0 {
-		maxSent = snapshot[len(snapshot)-1].Revision
+		maxSent = snapshot[len(snapshot)-1].Sequence()
 	} else {
 		maxSent = req.FromRevision - 1
 	}
@@ -378,8 +378,8 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 	if len(snapshot) > 0 {
 		if err := stream.Send(&WalEntryMsg{
 			Commit:              true,
-			CommitStartRevision: snapshot[0].Revision,
-			CommitRevision:      snapshot[len(snapshot)-1].Revision,
+			CommitStartRevision: snapshot[0].Sequence(),
+			CommitRevision:      snapshot[len(snapshot)-1].Sequence(),
 		}); err != nil {
 			return err
 		}
@@ -394,11 +394,13 @@ func (s *Server) Follow(req *FollowRequest, stream WalStream_FollowServer) error
 				// re-fetches the missed entries from the ring buffer.
 				return fmt.Errorf("follower stream closed: too slow, reconnect required")
 			}
-			if !msg.Commit && msg.Revision <= maxSent {
+			// Invariant: non-commit messages are produced by EntryToMsg and
+			// must carry a non-zero sequence ID.
+			if !msg.Commit && msg.ID <= maxSent {
 				continue
 			}
 			if !msg.Commit {
-				maxSent = msg.Revision
+				maxSent = msg.ID
 			}
 			if err := stream.Send(msg); err != nil {
 				return err
@@ -469,15 +471,17 @@ func (b *entryBuffer) push(e *wal.Entry) {
 }
 
 func (b *entryBuffer) since(fromRev int64) ([]*wal.Entry, bool) {
+	// fromRev is the next WAL sequence requested by the follower; the name is
+	// retained to match the FollowRequest wire field.
 	if len(b.entries) == 0 {
 		return nil, true
 	}
-	minRev := b.entries[0].Revision
+	minRev := b.entries[0].Sequence()
 	if fromRev < minRev {
 		return nil, false
 	}
 	for i, e := range b.entries {
-		if e.Revision >= fromRev {
+		if e.Sequence() >= fromRev {
 			out := make([]*wal.Entry, len(b.entries)-i)
 			copy(out, b.entries[i:])
 			return out, true

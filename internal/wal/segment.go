@@ -15,10 +15,10 @@ import (
 //
 //	[4:  magic    "T4\x01\n"]
 //	[8:  term     uint64 BE]
-//	[8:  firstRev int64  BE]      ← first revision in this segment (0 if unknown at open time)
+//	[8:  firstRev int64  BE]      ← first WAL sequence in this segment (legacy name)
 //	[entry frames ... ]
 //
-// The third byte of the magic string (\x01) is the WAL format version.
+// The third byte of the magic string is the WAL format version.
 // Readers check the full 4-byte magic; an incompatible format change bumps
 // this byte (e.g. \x02), causing old readers to reject new segments with a
 // clear error rather than silently misinterpreting them.
@@ -26,14 +26,17 @@ import (
 // Version history:
 //
 //	1 (\x01) — original format; CRC32C-framed entries, big-endian fixed fields.
+//	2 (\x02) — entry payload includes a WAL sequence ID separate from revision.
 const (
 	// WALFormatVersion is the format version encoded in the magic byte of every
 	// segment file. Increment this constant (and update segMagic) when making
 	// an incompatible change to the segment or entry wire format.
-	WALFormatVersion = 1
+	WALFormatVersion = 2
 
-	segMagic     = "T4\x01\n"
-	segHeaderLen = 20
+	segMagicPrefix = "T4"
+	segMagicSuffix = '\n'
+	segMagic       = "T4\x02\n"
+	segHeaderLen   = 20
 )
 
 // SegmentWriter appends entries to a local WAL segment file.
@@ -160,7 +163,8 @@ func (sw *SegmentWriter) EntryCount() int { return sw.entryCount }
 // Term returns the term this segment belongs to.
 func (sw *SegmentWriter) Term() uint64 { return sw.term }
 
-// FirstRev returns the first revision in this segment.
+// FirstRev returns the first WAL sequence in this segment. The name is kept for
+// compatibility with older code and on-disk object naming.
 func (sw *SegmentWriter) FirstRev() int64 { return sw.firstRev }
 
 // SegmentName returns the canonical file name for a segment.
@@ -192,6 +196,7 @@ type SegmentReader struct {
 	r        io.Reader
 	Term     uint64
 	FirstRev int64
+	version  int
 }
 
 // OpenSegmentFile opens a local file for reading.
@@ -218,19 +223,24 @@ func newSegmentReader(r io.Reader) (*SegmentReader, error) {
 	if _, err := io.ReadFull(r, hdr); err != nil {
 		return nil, fmt.Errorf("wal: read segment header: %w", err)
 	}
-	if string(hdr[0:4]) != segMagic {
+	if string(hdr[0:2]) != segMagicPrefix || hdr[3] != segMagicSuffix {
 		return nil, fmt.Errorf("wal: bad segment magic %q", hdr[0:4])
+	}
+	version := int(hdr[2])
+	if version != 1 && version != WALFormatVersion {
+		return nil, fmt.Errorf("wal: unsupported segment version %d", version)
 	}
 	return &SegmentReader{
 		r:        r,
 		Term:     binary.BigEndian.Uint64(hdr[4:12]),
 		FirstRev: int64(binary.BigEndian.Uint64(hdr[12:20])),
+		version:  version,
 	}, nil
 }
 
 // Next reads the next entry. Returns nil, io.EOF when the segment is exhausted.
 func (sr *SegmentReader) Next() (*Entry, error) {
-	return ReadEntry(sr.r)
+	return ReadEntryVersion(sr.r, sr.version)
 }
 
 // ReadAll reads all valid entries from the segment.

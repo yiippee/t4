@@ -9,18 +9,18 @@ import (
 	"github.com/t4db/t4/pkg/object"
 )
 
-// GCSegments deletes WAL segments from object storage whose entire revision
-// range is covered by checkpointRev.
+// GCSegments deletes WAL segments from object storage whose entire sequence
+// range is covered by checkpointSeq.
 //
 // A segment starting at firstRev[i] covers entries [firstRev[i], firstRev[i+1]-1].
-// It is safe to delete when firstRev[i+1]-1 <= checkpointRev, i.e.
-// firstRev[i+1] <= checkpointRev+1.
+// It is safe to delete when firstRev[i+1]-1 <= checkpointSeq, i.e.
+// firstRev[i+1] <= checkpointSeq+1.
 //
 // The most recent segment that starts at or before the checkpoint is always
-// retained as it may contain entries after checkpointRev.
+// retained as it may contain entries after checkpointSeq.
 //
 // Returns the number of segments deleted.
-func GCSegments(ctx context.Context, store object.Store, checkpointRev int64, log walLogger) (int, error) {
+func GCSegments(ctx context.Context, store object.Store, checkpointSeq int64, log walLogger) (int, error) {
 	keys, err := store.List(ctx, "wal/")
 	if err != nil {
 		return 0, fmt.Errorf("wal gc: list: %w", err)
@@ -38,8 +38,8 @@ func GCSegments(ctx context.Context, store object.Store, checkpointRev int64, lo
 	var toDelete []string
 	for i := 0; i < len(keys)-1; i++ {
 		nextFirstRev := firstRevs[i+1]
-		// Segment i ends at nextFirstRev-1; safe to delete if that is <= checkpointRev.
-		if nextFirstRev-1 <= checkpointRev {
+		// Segment i ends at nextFirstRev-1; safe to delete if that is <= checkpointSeq.
+		if nextFirstRev-1 <= checkpointSeq {
 			toDelete = append(toDelete, keys[i])
 		}
 	}
@@ -51,7 +51,7 @@ func GCSegments(ctx context.Context, store object.Store, checkpointRev int64, lo
 		return 0, nil
 	}
 	for _, k := range toDelete {
-		log.Debugf("wal gc: deleted %q (covered by checkpoint rev=%d)", k, checkpointRev)
+		log.Debugf("wal gc: deleted %q (covered by checkpoint seq=%d)", k, checkpointSeq)
 	}
 	return len(toDelete), nil
 }

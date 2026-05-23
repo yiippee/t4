@@ -85,11 +85,12 @@ func (c *Client) getConn() (*grpc.ClientConn, error) {
 	return conn, nil
 }
 
-// Follow streams WAL entries from the leader starting at fromRev. The leader
+// Follow streams WAL entries from the leader starting at fromRev. Despite the
+// historical name, fromRev is the next WAL sequence to request. The leader
 // may send entry messages ahead of its own local WAL fsync; followers stage
 // those entries in memory and only make them durable/visible after a matching
 // commit message arrives. On commit, the follower appends the committed batch
-// to its WAL, ACKs the highest committed revision back to the leader, then
+// to its WAL, ACKs the highest committed sequence back to the leader, then
 // applies the batch locally.
 //
 // Follow reconnects on transient errors. It returns:
@@ -100,7 +101,7 @@ func (c *Client) getConn() (*grpc.ClientConn, error) {
 func (c *Client) Follow(ctx context.Context, fromRev int64, walFn func([]wal.Entry) error, applyFn func([]wal.Entry) error) error {
 	consecutiveFailures := 0
 	for {
-		nextRev, err := c.followOnce(ctx, fromRev, walFn, applyFn)
+		nextSeq, err := c.followOnce(ctx, fromRev, walFn, applyFn)
 
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -115,12 +116,12 @@ func (c *Client) Follow(ctx context.Context, fromRev int64, walFn func([]wal.Ent
 			return err
 		}
 
-		if nextRev > fromRev {
+		if nextSeq > fromRev {
 			consecutiveFailures = 0
 		} else {
 			consecutiveFailures++
 		}
-		fromRev = nextRev
+		fromRev = nextSeq
 
 		if c.maxRetries > 0 && consecutiveFailures >= c.maxRetries {
 			c.log.Errorf("peer: leader unreachable after %d attempts", consecutiveFailures)
@@ -139,7 +140,7 @@ func (c *Client) Follow(ctx context.Context, fromRev int64, walFn func([]wal.Ent
 // followOnce makes one streaming attempt using the shared connection.
 // walFn must durably append a committed batch to the follower's local WAL.
 // applyFn updates follower local state after the ACK has been sent.
-// Returns the next fromRev (highest committed revision + 1) on any error.
+// Returns the next fromRev (highest committed sequence + 1) on any error.
 func (c *Client) followOnce(ctx context.Context, fromRev int64, walFn func([]wal.Entry) error, applyFn func([]wal.Entry) error) (int64, error) {
 	conn, err := c.getConn()
 	if err != nil {
@@ -221,7 +222,7 @@ func (c *Client) followOnce(ctx context.Context, fromRev int64, walFn func([]wal
 				continue
 			}
 			drop := 0
-			for drop < len(staged) && staged[drop].Revision < startRev {
+			for drop < len(staged) && staged[drop].Sequence() < startRev {
 				drop++
 			}
 			if drop > 0 {
@@ -229,29 +230,29 @@ func (c *Client) followOnce(ctx context.Context, fromRev int64, walFn func([]wal
 			}
 
 			cut := 0
-			for cut < len(staged) && staged[cut].Revision <= msg.CommitRevision {
+			for cut < len(staged) && staged[cut].Sequence() <= msg.CommitRevision {
 				cut++
 			}
-			if cut == 0 || staged[0].Revision != startRev || staged[cut-1].Revision != msg.CommitRevision {
+			if cut == 0 || staged[0].Sequence() != startRev || staged[cut-1].Sequence() != msg.CommitRevision {
 				return fromRev, ErrResyncRequired
 			}
 			batch := staged[:cut]
 			batchStartRev := startRev
-			if batch[0].Revision != batchStartRev {
+			if batch[0].Sequence() != batchStartRev {
 				return fromRev, ErrResyncRequired
 			}
 			for i, e := range batch {
-				if e.Revision != batchStartRev+int64(i) {
+				if e.Sequence() != batchStartRev+int64(i) {
 					return fromRev, ErrResyncRequired
 				}
 			}
 			if err := walFn(batch); err != nil {
 				return batchStartRev, err
 			}
-			if batch[len(batch)-1].Revision+1 > fromRev {
-				fromRev = batch[len(batch)-1].Revision + 1
+			if batch[len(batch)-1].Sequence()+1 > fromRev {
+				fromRev = batch[len(batch)-1].Sequence() + 1
 			}
-			if err := stream.SendAck(batch[len(batch)-1].Revision); err != nil {
+			if err := stream.SendAck(batch[len(batch)-1].Sequence()); err != nil {
 				return fromRev, err
 			}
 			if err := applyFn(batch); err != nil {

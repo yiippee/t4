@@ -1428,9 +1428,9 @@ func TestWALCorruptionMidSegment(t *testing.T) {
 	}
 
 	// Corrupt the CRC of entry at index 10 (key "/wal/10").
-	// Entries 0–9 have key len 6 → frame = 8 header + 49 fixed + 6 key + 1 val = 64 bytes.
-	// Entry 10 starts at: 20 (segment header) + 10*64 = 660; CRC at +4 → byte 664.
-	const corruptOffset = 20 + 10*64 + 4 // = 664
+	// Entries 0–9 have key len 6 → frame = 8 header + 57 fixed + 6 key + 1 val = 72 bytes.
+	// Entry 10 starts at: 20 (segment header) + 10*72 = 740; CRC at +4 → byte 744.
+	const corruptOffset = 20 + 10*72 + 4 // = 744
 	segPath := sw.Path()
 	data, err := os.ReadFile(segPath)
 	if err != nil {

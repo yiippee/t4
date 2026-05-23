@@ -27,6 +27,10 @@ const (
 
 // Entry is one record in the write-ahead log.
 type Entry struct {
+	// ID is the WAL/peer-stream identity. It is unique for every WAL entry,
+	// including metadata-only entries such as compaction. Older WAL entries have
+	// ID==0; in that case Revision is also the identity.
+	ID             int64
 	Revision       int64
 	Term           uint64
 	Op             Op
@@ -35,6 +39,14 @@ type Entry struct {
 	Lease          int64
 	CreateRevision int64 // meaningful for Update/Delete
 	PrevRevision   int64 // meaningful for Update/Delete
+}
+
+// Sequence returns the identity used for WAL ordering and peer-stream ACKs.
+func (e Entry) Sequence() int64 {
+	if e.ID != 0 {
+		return e.ID
+	}
+	return e.Revision
 }
 
 // TxnSubOp is one operation within an OpTxn entry.
@@ -127,11 +139,15 @@ func DecodeTxnOps(b []byte) ([]TxnSubOp, error) {
 //	[8:  lease           int64  BE]
 //	[8:  create_revision int64  BE]
 //	[8:  prev_revision   int64  BE]
+//	[8:  id              int64  BE] // optional in v1-compatible readers
 //	[4:  key_len         uint32 BE]
 //	[4:  val_len         uint32 BE]
 //	[key_len: key bytes]
 //	[val_len: value bytes]
-const entryFixedSize = 1 + 8 + 8 + 8 + 8 + 8 + 4 + 4 // 49 bytes
+const (
+	entryFixedSizeV1 = 1 + 8 + 8 + 8 + 8 + 8 + 4 + 4 // 49 bytes
+	entryFixedSize   = entryFixedSizeV1 + 8          // 57 bytes
+)
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
 
@@ -150,6 +166,11 @@ func AppendEntry(w io.Writer, e *Entry) error {
 // Returns nil, io.EOF when the stream is cleanly exhausted.
 // Returns nil, io.EOF on a truncated last frame (crash before fsync completed).
 func ReadEntry(r io.Reader) (*Entry, error) {
+	return ReadEntryVersion(r, WALFormatVersion)
+}
+
+// ReadEntryVersion reads an entry encoded for a specific WAL segment format.
+func ReadEntryVersion(r io.Reader, version int) (*Entry, error) {
 	var hdr [8]byte
 	_, err := io.ReadFull(r, hdr[:])
 	if err != nil {
@@ -173,7 +194,7 @@ func ReadEntry(r io.Reader) (*Entry, error) {
 		return nil, fmt.Errorf("wal: CRC mismatch (want %08x got %08x)", wantCRC, gotCRC)
 	}
 
-	return unmarshalEntry(payload)
+	return unmarshalEntryVersion(payload, version)
 }
 
 func marshalEntry(e *Entry) []byte {
@@ -184,15 +205,20 @@ func marshalEntry(e *Entry) []byte {
 	binary.BigEndian.PutUint64(buf[17:25], uint64(e.Lease))
 	binary.BigEndian.PutUint64(buf[25:33], uint64(e.CreateRevision))
 	binary.BigEndian.PutUint64(buf[33:41], uint64(e.PrevRevision))
-	binary.BigEndian.PutUint32(buf[41:45], uint32(len(e.Key)))
-	binary.BigEndian.PutUint32(buf[45:49], uint32(len(e.Value)))
-	copy(buf[49:], e.Key)
-	copy(buf[49+len(e.Key):], e.Value)
+	binary.BigEndian.PutUint64(buf[41:49], uint64(e.Sequence()))
+	binary.BigEndian.PutUint32(buf[49:53], uint32(len(e.Key)))
+	binary.BigEndian.PutUint32(buf[53:57], uint32(len(e.Value)))
+	copy(buf[57:], e.Key)
+	copy(buf[57+len(e.Key):], e.Value)
 	return buf
 }
 
 func unmarshalEntry(b []byte) (*Entry, error) {
-	if len(b) < entryFixedSize {
+	return unmarshalEntryVersion(b, WALFormatVersion)
+}
+
+func unmarshalEntryVersion(b []byte, version int) (*Entry, error) {
+	if len(b) < entryFixedSizeV1 {
 		return nil, fmt.Errorf("wal: entry too short: %d bytes", len(b))
 	}
 	e := &Entry{}
@@ -202,10 +228,18 @@ func unmarshalEntry(b []byte) (*Entry, error) {
 	e.Lease = int64(binary.BigEndian.Uint64(b[17:25]))
 	e.CreateRevision = int64(binary.BigEndian.Uint64(b[25:33]))
 	e.PrevRevision = int64(binary.BigEndian.Uint64(b[33:41]))
-	keyLen := int(binary.BigEndian.Uint32(b[41:45]))
-	valLen := int(binary.BigEndian.Uint32(b[45:49]))
+	fixedSize := entryFixedSizeV1
+	if version >= 2 {
+		if len(b) < entryFixedSize {
+			return nil, fmt.Errorf("wal: v2 entry too short: %d bytes", len(b))
+		}
+		e.ID = int64(binary.BigEndian.Uint64(b[41:49]))
+		fixedSize = entryFixedSize
+	}
+	keyLen := int(binary.BigEndian.Uint32(b[fixedSize-8 : fixedSize-4]))
+	valLen := int(binary.BigEndian.Uint32(b[fixedSize-4 : fixedSize]))
 
-	tail := b[49:]
+	tail := b[fixedSize:]
 	if len(tail) < keyLen+valLen {
 		return nil, fmt.Errorf("wal: entry payload truncated (need %d, have %d)", keyLen+valLen, len(tail))
 	}

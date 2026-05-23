@@ -18,8 +18,12 @@ import (
 )
 
 // replayPinned replays the specific WAL segments listed in rp, applying
-// entries with revision > afterRev. Used during RestorePoint bootstrap.
-func replayPinned(ctx context.Context, db *istore.Store, rp *RestorePoint, afterRev int64, log Logger) error {
+// entries with Sequence > afterSeq. Used during RestorePoint bootstrap.
+// afterSeq is the highest WAL/peer-stream sequence already applied to db
+// (typically db.LastSequence()); filtering by Sequence rather than Revision
+// is required after the seq/rev split because Compact entries carry the
+// same Revision as the preceding data write but a distinct Sequence.
+func replayPinned(ctx context.Context, db *istore.Store, rp *RestorePoint, afterSeq int64, log Logger) error {
 	for _, seg := range rp.WALSegments {
 		rc, err := rp.Store.GetVersioned(ctx, seg.Key, seg.VersionID)
 		if err != nil {
@@ -37,7 +41,7 @@ func replayPinned(ctx context.Context, db *istore.Store, rp *RestorePoint, after
 		}
 		var applicable []wal.Entry
 		for _, e := range entries {
-			if e.Revision > afterRev {
+			if e.Sequence() > afterSeq {
 				applicable = append(applicable, *e)
 			}
 		}
@@ -158,7 +162,12 @@ func (n *Node) restoreDBIfBehindCheckpoint(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
-func replayRemote(ctx context.Context, db *istore.Store, obj object.Store, afterRev int64, log Logger) error {
+// replayRemote replays WAL segments stored in the object store. afterSeq is
+// the highest WAL/peer-stream sequence already applied to db (typically
+// db.LastSequence()); entries with Sequence <= afterSeq are skipped. After
+// merge, the stream is required to be sequence-contiguous starting from
+// afterSeq+1.
+func replayRemote(ctx context.Context, db *istore.Store, obj object.Store, afterSeq int64, log Logger) error {
 	keys, err := obj.List(ctx, "wal/")
 	if err != nil {
 		return err
@@ -166,13 +175,13 @@ func replayRemote(ctx context.Context, db *istore.Store, obj object.Store, after
 
 	// Build per-term cutoffs to handle leader-change conflicts.
 	//
-	// When a new leader takes over at revision X, it starts writing a new term
-	// from revision X+1. The old leader may have written S3 segments that cover
-	// some of those same revisions (X+1, X+2, …). Applying both the old-term
-	// and new-term entries at the same revision would corrupt the index.
+	// When a new leader takes over at sequence X, it starts writing a new term
+	// from sequence X+1. The old leader may have written S3 segments that cover
+	// some of those same sequences (X+1, X+2, ...). Applying both the old-term
+	// and new-term entries at the same sequence would corrupt the index.
 	//
-	// cutoff[term] is the minimum firstRev among all segments with term > term.
-	// Old-term entries at revision >= cutoff are superseded by the new term and
+	// cutoff[term] is the minimum first sequence among all segments with term > term.
+	// Old-term entries at sequence >= cutoff are superseded by the new term and
 	// must be skipped. For the highest term present, cutoff = math.MaxInt64 (no
 	// upper bound — apply all entries).
 	cutoff := walTermCutoffs(keys)
@@ -197,10 +206,10 @@ func replayRemote(ctx context.Context, db *istore.Store, obj object.Store, after
 			log.Warnf("t4: partial remote segment %q: %v", key, readErr)
 		}
 		for _, e := range entries {
-			if e.Revision <= afterRev {
+			if e.Sequence() <= afterSeq {
 				continue // already covered by checkpoint / local WAL
 			}
-			if e.Revision >= termCutoff {
+			if e.Sequence() >= termCutoff {
 				continue // superseded by a higher-term entry at this revision
 			}
 			all = append(all, *e)
@@ -214,14 +223,14 @@ func replayRemote(ctx context.Context, db *istore.Store, obj object.Store, after
 	// Ensure deterministic order and resolve same-revision duplicates by
 	// keeping the highest-term entry at each revision.
 	sort.Slice(all, func(i, j int) bool {
-		if all[i].Revision != all[j].Revision {
-			return all[i].Revision < all[j].Revision
+		if all[i].Sequence() != all[j].Sequence() {
+			return all[i].Sequence() < all[j].Sequence()
 		}
 		return all[i].Term < all[j].Term
 	})
 	merged := make([]wal.Entry, 0, len(all))
 	for _, e := range all {
-		if n := len(merged); n > 0 && merged[n-1].Revision == e.Revision {
+		if n := len(merged); n > 0 && merged[n-1].Sequence() == e.Sequence() {
 			if e.Term >= merged[n-1].Term {
 				merged[n-1] = e
 			}
@@ -230,12 +239,12 @@ func replayRemote(ctx context.Context, db *istore.Store, obj object.Store, after
 		merged = append(merged, e)
 	}
 
-	// Fail closed on holes: a missing revision means we likely raced WAL GC
+	// Fail closed on holes: a missing sequence means we likely raced WAL GC
 	// during bootstrap/resync and must restore from a fresher checkpoint.
-	expected := afterRev + 1
+	expected := afterSeq + 1
 	for _, e := range merged {
-		if e.Revision != expected {
-			return fmt.Errorf("replayRemote: missing revision(s): expected %d got %d", expected, e.Revision)
+		if e.Sequence() != expected {
+			return fmt.Errorf("replayRemote: missing sequence(s): expected %d got %d", expected, e.Sequence())
 		}
 		expected++
 	}
@@ -246,12 +255,13 @@ func replayRemote(ctx context.Context, db *istore.Store, obj object.Store, after
 	return nil
 }
 
-// walTermCutoffs returns a map from term → the minimum firstRev of any
+// walTermCutoffs returns a map from term to the minimum first sequence of any
 // segment whose term is strictly greater. Entries from a given term at
-// revisions >= cutoff are superseded by the newer term and should be skipped.
+// sequences >= cutoff are superseded by the newer term and should be skipped.
 // The highest term maps to math.MaxInt64 (no cutoff).
 func walTermCutoffs(keys []string) map[uint64]int64 {
-	// Collect the minimum firstRev for each term.
+	// Collect the minimum first sequence for each term. The object-key field is
+	// still named firstRev for v1 WAL compatibility.
 	minFirstRev := map[uint64]int64{}
 	for _, key := range keys {
 		term, firstRev := parseWALKey(key)
@@ -272,7 +282,7 @@ func walTermCutoffs(keys []string) map[uint64]int64 {
 	return cutoff
 }
 
-// parseWALKey extracts term and firstRev from a WAL object key of the form
+// parseWALKey extracts term and first sequence from a WAL object key of the form
 // "wal/{term:010d}/{firstRev:020d}".
 func parseWALKey(key string) (term uint64, firstRev int64) {
 	parts := strings.SplitN(key, "/", 3)

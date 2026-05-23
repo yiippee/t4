@@ -30,9 +30,14 @@ var ErrClosed = errors.New("store: closed")
 type Store struct {
 	db *pebble.DB
 
-	// currentRev and compactRev are accessed atomically.
+	// currentRev, compactRev and lastSeq are accessed atomically.
+	// currentRev is the highest user-visible revision (advanced by data
+	// writes only). lastSeq is the highest WAL/peer-stream sequence applied
+	// (advanced by every entry, including Compact). They diverge after
+	// Compact entries, which consume a sequence but not a revision.
 	currentRev int64
 	compactRev int64
+	lastSeq    int64
 
 	// mu protects notify and watch prefix accounting.
 	mu        sync.RWMutex
@@ -138,12 +143,26 @@ func (s *Store) loadMeta() error {
 		return fmt.Errorf("store: read compact rev: %w", err)
 	}
 
+	// Read last applied WAL sequence. Older stores written before
+	// metaLastSeqKey fall back to currentRev (which equals sequence in the
+	// pre-Compact-doesn't-bump-rev world).
+	v, closer, err = s.db.Get(metaLastSeqKey)
+	if err == nil {
+		s.lastSeq = decodeRev(v)
+		_ = closer.Close()
+	} else if err != pebble.ErrNotFound {
+		return fmt.Errorf("store: read last seq: %w", err)
+	}
+
 	// Read current revision from explicit meta key (written since the
 	// metaCurrentRevKey was introduced).
 	v, closer, err = s.db.Get(metaCurrentRevKey)
 	if err == nil {
 		s.currentRev = decodeRev(v)
 		closer.Close()
+		if s.lastSeq < s.currentRev {
+			s.lastSeq = s.currentRev
+		}
 		return nil
 	} else if err != pebble.ErrNotFound {
 		return fmt.Errorf("store: read current rev: %w", err)
@@ -161,6 +180,9 @@ func (s *Store) loadMeta() error {
 	defer iter.Close()
 	if iter.Last() {
 		s.currentRev = decodeLogKey(iter.Key())
+	}
+	if s.lastSeq < s.currentRev {
+		s.lastSeq = s.currentRev
 	}
 	return nil
 }
@@ -193,6 +215,11 @@ func (s *Store) CurrentRevision() int64 { return atomic.LoadInt64(&s.currentRev)
 // CompactRevision returns the oldest revision still available.
 func (s *Store) CompactRevision() int64 { return atomic.LoadInt64(&s.compactRev) }
 
+// LastSequence returns the highest WAL/peer-stream sequence applied. Used by
+// WAL-replay code to validate stream continuity. Diverges from
+// CurrentRevision after Compact entries.
+func (s *Store) LastSequence() int64 { return atomic.LoadInt64(&s.lastSeq) }
+
 // Apply applies a batch of WAL entries to the store and notifies watchers.
 // Entries must be ordered by revision. Apply is not safe for concurrent use.
 func (s *Store) Apply(entries []wal.Entry) error {
@@ -200,39 +227,53 @@ func (s *Store) Apply(entries []wal.Entry) error {
 		return nil
 	}
 	b := s.db.NewBatch()
-	var maxRev int64
+	var maxRev, maxSeq int64
 	for i := range entries {
 		e := &entries[i]
 		if e.Op == wal.OpCompact {
 			// PrevRevision carries the compact target (see node.go Compact).
 			if err := s.applyCompact(b, e.PrevRevision); err != nil {
-				b.Close()
+				_ = b.Close()
 				return err
 			}
-			if e.Revision > maxRev {
-				maxRev = e.Revision
+			if seq := e.Sequence(); seq > maxSeq {
+				maxSeq = seq
 			}
 			continue
 		}
 		if err := s.applyEntry(b, e); err != nil {
-			b.Close()
+			_ = b.Close()
 			return err
 		}
 		if e.Revision > maxRev {
 			maxRev = e.Revision
 		}
+		if seq := e.Sequence(); seq > maxSeq {
+			maxSeq = seq
+		}
 	}
 	if maxRev > 0 {
 		if err := b.Set(metaCurrentRevKey, encodeRev(maxRev), pebble.NoSync); err != nil {
-			b.Close()
+			_ = b.Close()
 			return fmt.Errorf("store: set current rev: %w", err)
 		}
 	}
+	if maxSeq > 0 {
+		if err := b.Set(metaLastSeqKey, encodeRev(maxSeq), pebble.NoSync); err != nil {
+			_ = b.Close()
+			return fmt.Errorf("store: set last seq: %w", err)
+		}
+	}
 	if err := b.Commit(pebble.NoSync); err != nil {
-		b.Close()
+		_ = b.Close()
 		return fmt.Errorf("store: commit batch: %w", err)
 	}
-	atomic.StoreInt64(&s.currentRev, maxRev)
+	if maxRev > 0 {
+		atomic.StoreInt64(&s.currentRev, maxRev)
+	}
+	if maxSeq > 0 && maxSeq > atomic.LoadInt64(&s.lastSeq) {
+		atomic.StoreInt64(&s.lastSeq, maxSeq)
+	}
 	s.broadcast()
 	return nil
 }
@@ -244,12 +285,15 @@ func (s *Store) Recover(entries []wal.Entry) error {
 		return nil
 	}
 	b := s.db.NewBatch()
-	var maxRev int64
+	var maxRev, maxSeq int64
 	for i := range entries {
 		e := &entries[i]
+		if seq := e.Sequence(); seq > maxSeq {
+			maxSeq = seq
+		}
 		if e.Op == wal.OpCompact {
 			if err := s.applyCompact(b, e.PrevRevision); err != nil {
-				b.Close()
+				_ = b.Close()
 				return err
 			}
 		} else {
@@ -292,22 +336,31 @@ func (s *Store) Recover(entries []wal.Entry) error {
 				return err
 			}
 		}
-		if e.Revision > maxRev {
+		if e.Op != wal.OpCompact && e.Revision > maxRev {
 			maxRev = e.Revision
 		}
 	}
 	if maxRev > 0 {
 		if err := b.Set(metaCurrentRevKey, encodeRev(maxRev), pebble.NoSync); err != nil {
-			b.Close()
+			_ = b.Close()
 			return fmt.Errorf("store: set current rev: %w", err)
 		}
 	}
+	if maxSeq > 0 {
+		if err := b.Set(metaLastSeqKey, encodeRev(maxSeq), pebble.NoSync); err != nil {
+			_ = b.Close()
+			return fmt.Errorf("store: set last seq: %w", err)
+		}
+	}
 	if err := b.Commit(pebble.Sync); err != nil {
-		b.Close()
+		_ = b.Close()
 		return fmt.Errorf("store: commit recover batch: %w", err)
 	}
 	if maxRev > atomic.LoadInt64(&s.currentRev) {
 		atomic.StoreInt64(&s.currentRev, maxRev)
+	}
+	if maxSeq > atomic.LoadInt64(&s.lastSeq) {
+		atomic.StoreInt64(&s.lastSeq, maxSeq)
 	}
 	return nil
 }

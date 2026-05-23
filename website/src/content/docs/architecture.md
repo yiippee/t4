@@ -98,7 +98,7 @@ The checkpoint cycle (triggered by `CheckpointInterval` or `CheckpointEntries`):
 4. Upload Pebble metadata files (`MANIFEST-*`, `OPTIONS-*`, `CURRENT`) to `checkpoint/<term>/<revision>/`.
 5. Write a `checkpoint/<term>/<revision>/manifest.json` index listing all SST keys and metadata filenames.
 6. Write `manifest/latest` pointing to the new index.
-7. GC S3 WAL segments fully covered by `min(checkpointRev, minFollowerAppliedRev)` — ensuring no segment is deleted while a connected follower still needs it.
+7. GC S3 WAL segments fully covered by `min(checkpointSeq, minFollowerAppliedSeq)` — ensuring no segment is deleted while a connected follower still needs it.
 8. GC old checkpoint directories (keep the two most recent); delete SST objects no longer referenced by any live checkpoint or branch registry entry.
 
 ### Content-addressed SSTs

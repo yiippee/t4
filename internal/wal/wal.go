@@ -109,6 +109,44 @@ func Open(dir string, term uint64, startRev int64, opts ...Option) (*WAL, error)
 	return w, nil
 }
 
+// MaxSequence returns the highest WAL sequence found in local segment files.
+// It is used before opening a new writer so metadata-only entries that do not
+// advance the user revision still keep the next segment from reusing their ID.
+func MaxSequence(dir string) (int64, error) {
+	paths, err := LocalSegments(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	var maxSeq int64
+	var firstErr error
+	for _, path := range paths {
+		sr, closer, err := OpenSegmentFile(path)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		entries, readErr := sr.ReadAll()
+		closer()
+		for _, e := range entries {
+			if seq := e.Sequence(); seq > maxSeq {
+				maxSeq = seq
+			}
+		}
+		if readErr != nil {
+			if firstErr == nil {
+				firstErr = readErr
+			}
+			continue
+		}
+	}
+	return maxSeq, firstErr
+}
+
 // Open opens (or creates) the WAL directory and prepares the active segment.
 // Callers must call Start to begin background processing.
 func (w *WAL) Open(dir string, term uint64, startRev int64) error {
@@ -130,8 +168,12 @@ func (w *WAL) Open(dir string, term uint64, startRev int64) error {
 }
 
 // ReplayLocal replays locally stored WAL segments into db, applying entries
-// whose revision is greater than afterRev.
-func (w *WAL) ReplayLocal(db RecoveryStore, afterRev int64) error {
+// whose Sequence is greater than afterSeq. afterSeq is the highest
+// WAL/peer-stream sequence already applied (typically db.LastSequence());
+// filtering by Sequence rather than Revision is required after the seq/rev
+// split because Compact entries share their Revision with the preceding
+// data write but have a distinct Sequence.
+func (w *WAL) ReplayLocal(db RecoveryStore, afterSeq int64) error {
 	paths, err := LocalSegments(w.dir)
 	if err != nil {
 		return err
@@ -148,7 +190,7 @@ func (w *WAL) ReplayLocal(db RecoveryStore, afterRev int64) error {
 		}
 		var applicable []Entry
 		for _, e := range entries {
-			if e.Revision > afterRev {
+			if e.Sequence() > afterSeq {
 				applicable = append(applicable, *e)
 			}
 		}
@@ -494,8 +536,9 @@ drained:
 }
 
 // SealAndFlush seals the active segment immediately (blocking) and queues it
-// for upload. Used before taking a checkpoint.
-func (w *WAL) SealAndFlush(nextRev int64) error {
+// for upload. nextSeq is the first WAL sequence expected in the new segment.
+// Used before taking a checkpoint.
+func (w *WAL) SealAndFlush(nextSeq int64) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.active == nil || w.active.EntryCount() == 0 {
@@ -505,7 +548,7 @@ func (w *WAL) SealAndFlush(nextRev int64) error {
 	if err := old.Seal(); err != nil {
 		return err
 	}
-	sw, err := OpenSegmentWriter(w.dir, w.term, nextRev)
+	sw, err := OpenSegmentWriter(w.dir, w.term, nextSeq)
 	if err != nil {
 		return err
 	}

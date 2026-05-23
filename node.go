@@ -172,6 +172,11 @@ type Node struct {
 	// on the write path so that in-flight entries have distinct revisions.
 	nextRev int64
 
+	// nextSeq is the last WAL/peer-stream identity assigned to any entry.
+	// Unlike nextRev, metadata-only entries such as Compact consume a sequence
+	// number without consuming a user-visible revision.
+	nextSeq int64
+
 	// pending holds in-flight writes that have been assigned a revision but
 	// not yet applied to Pebble. Protected by mu.
 	pending map[string]pendingKV
@@ -392,13 +397,34 @@ func Open(cfg Config) (*Node, error) {
 	if w == nil {
 		w = wal.New(opts...)
 	}
-	if err := w.Open(walDir, term, startRev+1); err != nil {
+	// Seed nextSeq from the persisted lastSeq (set by Apply/Recover from
+	// every WAL entry, including Compact). Falling back to startRev (which
+	// is a user revision) would reuse sequence numbers after a checkpoint
+	// taken post-Compact, breaking peer dedup. Take the max with the local
+	// WAL's last sequence in case the local WAL is ahead of Pebble.
+	nextSeq := db.LastSequence()
+	if maxSeq, merr := wal.MaxSequence(walDir); maxSeq > nextSeq {
+		// MaxSequence may return a partial max with an error when one local
+		// segment is corrupt. Trust the partial value as a lower bound so the
+		// next writer cannot reuse a sequence that was already present in WAL.
+		nextSeq = maxSeq
+		if merr != nil {
+			log.Warnf("t4: scan local WAL sequence: %v", merr)
+		}
+	} else if merr != nil {
+		log.Warnf("t4: scan local WAL sequence: %v", merr)
+	}
+	if err := w.Open(walDir, term, nextSeq+1); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("t4: open wal: %w", err)
 	}
 
 	// ── Replay local WAL ─────────────────────────────────────────────────────
-	if err := w.ReplayLocal(db, startRev); err != nil {
+	// ReplayLocal filters by entry.Sequence(), so pass LastSequence — after a
+	// post-compact checkpoint LastSequence > CurrentRevision and entries with
+	// Sequence in (CurrentRevision, LastSequence] would otherwise be replayed
+	// again (idempotent today, but inconsistent with the seq/rev split).
+	if err := w.ReplayLocal(db, db.LastSequence()); err != nil {
 		w.Close()
 		db.Close()
 		return nil, fmt.Errorf("t4: local WAL replay: %w", err)
@@ -411,7 +437,7 @@ func Open(cfg Config) (*Node, error) {
 	case cfg.RestorePoint != nil:
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
-		if err := replayPinned(ctx, db, cfg.RestorePoint, startRev, log); err != nil {
+		if err := replayPinned(ctx, db, cfg.RestorePoint, db.LastSequence(), log); err != nil {
 			w.Close()
 			db.Close()
 			return nil, fmt.Errorf("t4: pinned WAL replay: %w", err)
@@ -421,7 +447,7 @@ func Open(cfg Config) (*Node, error) {
 		if cfg.ObjectStore != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
-			if err := replayRemote(ctx, db, cfg.ObjectStore, startRev, log); err != nil {
+			if err := replayRemote(ctx, db, cfg.ObjectStore, db.LastSequence(), log); err != nil {
 				w.Close()
 				db.Close()
 				return nil, fmt.Errorf("t4: branch WAL replay: %w", err)
@@ -449,7 +475,7 @@ func Open(cfg Config) (*Node, error) {
 		// per checkpoint interval that fires during replay.
 		for range 10 { // cap at 10 iterations; converges in 1-2 on any real cluster
 			startRevBeforeReplay := db.CurrentRevision()
-			replayErr := replayRemote(ctx, db, cfg.ObjectStore, startRevBeforeReplay, log)
+			replayErr := replayRemote(ctx, db, cfg.ObjectStore, db.LastSequence(), log)
 
 			// Always check manifest after replay, even on error: if a WAL
 			// segment was GCed mid-read replayRemote returns ErrNotFound, but
@@ -519,13 +545,32 @@ func Open(cfg Config) (*Node, error) {
 				}
 			}
 			w.Close()
-			if rerr := w.Open(walDir, newTerm, freshDB.CurrentRevision()+1); rerr != nil {
+			reopenSeq := freshDB.LastSequence()
+			if maxSeq, merr := wal.MaxSequence(walDir); maxSeq > reopenSeq {
+				// See the startup scan above: a partial max is still a lower
+				// bound that prevents WAL sequence reuse.
+				reopenSeq = maxSeq
+				if merr != nil {
+					log.Warnf("t4: scan local WAL sequence after GC-gap fix: %v", merr)
+				}
+			} else if merr != nil {
+				log.Warnf("t4: scan local WAL sequence after GC-gap fix: %v", merr)
+			}
+			if rerr := w.Open(walDir, newTerm, reopenSeq+1); rerr != nil {
 				freshDB.Close()
 				return nil, fmt.Errorf("t4: reopen wal after GC-gap fix: %w", rerr)
 			}
-			db, term, startRev = freshDB, newTerm, freshDB.CurrentRevision()
+			db, term, startRev, nextSeq = freshDB, newTerm, freshDB.CurrentRevision(), reopenSeq
 			log.Infof("t4: checkpoint refreshed to rev=%d (term=%d)", startRev, term)
 		}
+	}
+
+	// Refresh nextSeq from the persisted lastSeq after every replay path
+	// (local WAL, branch, restore-point, and remote S3) has run. Any path
+	// that advances db.LastSequence() past the value computed before replay
+	// must not let the next live write reuse an already-applied sequence.
+	if ls := db.LastSequence(); ls > nextSeq {
+		nextSeq = ls
 	}
 
 	bgCtx, bgCancel := context.WithCancel(context.Background())
@@ -536,6 +581,7 @@ func Open(cfg Config) (*Node, error) {
 		bgCtx:       bgCtx,
 		cancelBg:    bgCancel,
 		nextRev:     db.CurrentRevision(),
+		nextSeq:     nextSeq,
 		pending:     make(map[string]pendingKV),
 		writeC:      make(chan *writeReq, 1024),
 		sstUploader: sstUp,
@@ -955,8 +1001,8 @@ func (n *Node) Flush() error {
 	if n.closed.Load() {
 		return ErrClosed
 	}
-	rev := n.db.Load().CurrentRevision()
-	if err := n.wal.SealAndFlush(rev + 1); err != nil {
+	seq := n.db.Load().LastSequence()
+	if err := n.wal.SealAndFlush(seq + 1); err != nil {
 		return err
 	}
 	return n.db.Load().Flush()
