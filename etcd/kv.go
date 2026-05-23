@@ -39,9 +39,9 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 				err    error
 			)
 			if linearizable {
-				exists, err = s.node.LinearizableExists(ctx, key, readRev)
+				exists, err = s.node.LinearizableExists(ctx, key, t4.WithRevision(readRev))
 			} else {
-				exists, err = s.node.Exists(key, readRev)
+				exists, err = s.node.Exists(key, t4.WithRevision(readRev))
 			}
 			if err != nil {
 				return nil, rangeReadError(err)
@@ -57,9 +57,9 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 			err error
 		)
 		if linearizable {
-			kv, err = s.node.LinearizableGet(ctx, key, readRev)
+			kv, err = s.node.LinearizableGet(ctx, key, t4.WithRevision(readRev))
 		} else {
-			kv, err = s.node.Get(key, readRev)
+			kv, err = s.node.Get(key, t4.WithRevision(readRev))
 		}
 		if err != nil {
 			return nil, rangeReadError(err)
@@ -83,9 +83,9 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 				err   error
 			)
 			if linearizable {
-				count, err = s.node.LinearizableCount(ctx, scanPrefix, readRev)
+				count, err = s.node.LinearizableCount(ctx, scanPrefix, t4.WithRevision(readRev))
 			} else {
-				count, err = s.node.Count(scanPrefix, readRev)
+				count, err = s.node.Count(scanPrefix, t4.WithRevision(readRev))
 			}
 			if err != nil {
 				return nil, rangeReadError(err)
@@ -98,9 +98,9 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 			err error
 		)
 		if linearizable {
-			all, err = s.node.LinearizableList(ctx, scanPrefix, readRev)
+			all, err = s.node.LinearizableList(ctx, scanPrefix, t4.WithRevision(readRev))
 		} else {
-			all, err = s.node.List(scanPrefix, readRev)
+			all, err = s.node.List(scanPrefix, t4.WithRevision(readRev))
 		}
 		if err != nil {
 			return nil, rangeReadError(err)
@@ -122,17 +122,17 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 	if isExactPrefixRange(key, rangeEnd) && r.Limit > 0 {
 		var total int64
 		if linearizable {
-			total, err = s.node.LinearizableCount(ctx, scanPrefix, readRev)
+			total, err = s.node.LinearizableCount(ctx, scanPrefix, t4.WithRevision(readRev))
 		} else {
-			total, err = s.node.Count(scanPrefix, readRev)
+			total, err = s.node.Count(scanPrefix, t4.WithRevision(readRev))
 		}
 		if err != nil {
 			return nil, rangeReadError(err)
 		}
 		if linearizable {
-			all, err = s.node.LinearizableListLimit(ctx, scanPrefix, r.Limit, readRev)
+			all, err = s.node.LinearizableList(ctx, scanPrefix, t4.WithLimit(r.Limit), t4.WithRevision(readRev))
 		} else {
-			all, err = s.node.ListLimit(scanPrefix, r.Limit, readRev)
+			all, err = s.node.List(scanPrefix, t4.WithLimit(r.Limit), t4.WithRevision(readRev))
 		}
 		if err != nil {
 			return nil, rangeReadError(err)
@@ -150,9 +150,9 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 	}
 
 	if linearizable {
-		all, err = s.node.LinearizableList(ctx, scanPrefix, readRev)
+		all, err = s.node.LinearizableList(ctx, scanPrefix, t4.WithRevision(readRev))
 	} else {
-		all, err = s.node.List(scanPrefix, readRev)
+		all, err = s.node.List(scanPrefix, t4.WithRevision(readRev))
 	}
 	if err != nil {
 		return nil, rangeReadError(err)

@@ -182,7 +182,7 @@ func (s *Store) loadMeta() error {
 	if err != nil {
 		return fmt.Errorf("store: new iter for loadMeta: %w", err)
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 	if iter.Last() {
 		s.currentRev = decodeLogKey(iter.Key())
 	}
@@ -452,7 +452,7 @@ func (s *Store) applyCompact(b *pebble.Batch, compactRev int64) error {
 	if err != nil {
 		return fmt.Errorf("store: compact iter: %w", err)
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
 	for iter.First(); iter.Valid(); iter.Next() {
 		entryRev := decodeLogKey(iter.Key())
@@ -493,7 +493,7 @@ func (s *Store) hasLaterRevisionAtOrBefore(key string, afterRev, beforeOrEqualRe
 	if err != nil {
 		return false, fmt.Errorf("store: compact later-revision iter: %w", err)
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 	for iter.First(); iter.Valid(); iter.Next() {
 		r, err := unmarshalRecord(iter.Value())
 		if err != nil {
@@ -561,6 +561,14 @@ type KeyValue struct {
 	CreateRevision int64
 	PrevRevision   int64
 	Lease          int64
+}
+
+// ReadOptions refines store reads. Zero values mean HEAD, no lower key bound,
+// and no limit.
+type ReadOptions struct {
+	Revision int64
+	FromKey  string
+	Limit    int64
 }
 
 // Get returns the current value of key, or nil if not found.
@@ -663,7 +671,7 @@ func (s *Store) getLogEntry(key string, rev int64) (*KeyValue, error) {
 	if iterErr != nil {
 		return nil, fmt.Errorf("store: get log txn scan rev=%d: %w", rev, iterErr)
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 	for iter.First(); iter.Valid(); iter.Next() {
 		r, rerr := unmarshalRecord(iter.Value())
 		if rerr != nil {
@@ -691,7 +699,7 @@ func (s *Store) getAtRevision(key string, targetRev int64) (*KeyValue, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: get-at iter: %w", err)
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
 	for iter.Last(); iter.Valid(); iter.Prev() {
 		rev := decodeLogKey(iter.Key())
@@ -726,49 +734,17 @@ func (s *Store) List(prefix string) ([]*KeyValue, error) {
 // ListLimit returns up to limit live keys with the given prefix. A limit <= 0
 // returns all matching keys.
 func (s *Store) ListLimit(prefix string, limit int64) ([]*KeyValue, error) {
-	lower := idxKey(prefix)
-	upper := idxKeyUpper(prefix)
-
-	iter, err := s.db.NewIter(&pebble.IterOptions{
-		LowerBound: lower,
-		UpperBound: upper,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("store: list iter: %w", err)
-	}
-	defer iter.Close()
-
-	var out []*KeyValue
-	for iter.First(); iter.Valid(); iter.Next() {
-		if limit > 0 && int64(len(out)) >= limit {
-			break
-		}
-		k := string(iter.Key()[1:]) // strip 'i' prefix
-		rev := decodeRev(iter.Value())
-		kv, err := s.getLogEntry(k, rev)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, kv)
-	}
-	return out, iter.Error()
+	return s.ListRange(prefix, ReadOptions{Limit: limit})
 }
 
-// ListAt returns live keys with prefix as of revision, sorted lexicographically.
-// A revision of 0 means current.
-func (s *Store) ListAt(prefix string, revision int64) ([]*KeyValue, error) {
-	return s.ListLimitAt(prefix, 0, revision)
-}
-
-// ListLimitAt returns up to limit live keys with prefix as of revision. A
-// revision of 0 means current.
-func (s *Store) ListLimitAt(prefix string, limit int64, revision int64) ([]*KeyValue, error) {
-	targetRev, err := s.resolveReadRevision(revision)
+// ListRange returns live keys matching prefix and opts, sorted lexicographically.
+func (s *Store) ListRange(prefix string, opts ReadOptions) ([]*KeyValue, error) {
+	targetRev, err := s.resolveReadRevision(opts.Revision)
 	if err != nil {
 		return nil, err
 	}
-	if revision == 0 {
-		return s.ListLimit(prefix, limit)
+	if opts.Revision == 0 {
+		return s.listCurrent(prefix, opts.FromKey, opts.Limit)
 	}
 
 	events, _, err := s.scanLog(prefix, 1, targetRev, false)
@@ -792,7 +768,10 @@ func (s *Store) ListLimitAt(prefix string, limit int64, revision int64) ([]*KeyV
 
 	out := make([]*KeyValue, 0, len(keys))
 	for _, key := range keys {
-		if limit > 0 && int64(len(out)) >= limit {
+		if opts.FromKey != "" && key < opts.FromKey {
+			continue
+		}
+		if opts.Limit > 0 && int64(len(out)) >= opts.Limit {
 			break
 		}
 		out = append(out, latest[key])
@@ -800,9 +779,14 @@ func (s *Store) ListLimitAt(prefix string, limit int64, revision int64) ([]*KeyV
 	return out, nil
 }
 
-// Count returns the number of live keys with the given prefix.
-func (s *Store) Count(prefix string) (int64, error) {
+func (s *Store) listCurrent(prefix, fromKey string, limit int64) ([]*KeyValue, error) {
 	lower := idxKey(prefix)
+	if fromKey != "" {
+		fromLower := idxKey(fromKey)
+		if string(fromLower) > string(lower) {
+			lower = fromLower
+		}
+	}
 	upper := idxKeyUpper(prefix)
 
 	iter, err := s.db.NewIter(&pebble.IterOptions{
@@ -810,28 +794,67 @@ func (s *Store) Count(prefix string) (int64, error) {
 		UpperBound: upper,
 	})
 	if err != nil {
-		return 0, fmt.Errorf("store: count iter: %w", err)
+		return nil, fmt.Errorf("store: list iter: %w", err)
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
+	var out []*KeyValue
+	for iter.First(); iter.Valid(); iter.Next() {
+		if limit > 0 && int64(len(out)) >= limit {
+			break
+		}
+		k := string(iter.Key()[1:]) // strip 'i' prefix
+		rev := decodeRev(iter.Value())
+		kv, err := s.getLogEntry(k, rev)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, kv)
+	}
+	return out, iter.Error()
+}
+
+// Count returns the number of live keys with the given prefix.
+func (s *Store) Count(prefix string) (int64, error) {
+	return s.CountRange(prefix, ReadOptions{})
+}
+
+// CountRange returns the number of live keys matching prefix and opts.
+func (s *Store) CountRange(prefix string, opts ReadOptions) (int64, error) {
+	if opts.Revision == 0 {
+		return s.countCurrent(prefix, opts.FromKey)
+	}
+	kvs, err := s.ListRange(prefix, ReadOptions{Revision: opts.Revision, FromKey: opts.FromKey})
+	if err != nil {
+		return 0, err
+	}
+	return int64(len(kvs)), nil
+}
+
+// countCurrent counts live keys with prefix at HEAD whose key is
+// lexicographically >= fromKey when fromKey is set.
+func (s *Store) countCurrent(prefix, fromKey string) (int64, error) {
+	lower := idxKey(prefix)
+	if fromKey != "" {
+		fromLower := idxKey(fromKey)
+		if string(fromLower) > string(lower) {
+			lower = fromLower
+		}
+	}
+	upper := idxKeyUpper(prefix)
+	iter, err := s.db.NewIter(&pebble.IterOptions{
+		LowerBound: lower,
+		UpperBound: upper,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("store: count-from iter: %w", err)
+	}
+	defer func() { _ = iter.Close() }()
 	var n int64
 	for iter.First(); iter.Valid(); iter.Next() {
 		n++
 	}
 	return n, iter.Error()
-}
-
-// CountAt returns the number of live keys with prefix as of revision. A
-// revision of 0 means current.
-func (s *Store) CountAt(prefix string, revision int64) (int64, error) {
-	if revision == 0 {
-		return s.Count(prefix)
-	}
-	kvs, err := s.ListAt(prefix, revision)
-	if err != nil {
-		return 0, err
-	}
-	return int64(len(kvs)), nil
 }
 
 // History returns change events for a single key in revision order.
@@ -995,7 +1018,7 @@ func (s *Store) scanLog(prefix string, fromRev, toRev int64, withPrevKV bool) ([
 	if err != nil {
 		return nil, 0, fmt.Errorf("store: scan log iter: %w", err)
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
 	var events []Event
 	var scanned int

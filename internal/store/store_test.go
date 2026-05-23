@@ -280,7 +280,7 @@ func TestListLimitCountAtRevision(t *testing.T) {
 		deleteEntry(5, "/a/2", 2, 2),
 	)
 
-	kvs, err := s.ListLimitAt("/a/", 2, 3)
+	kvs, err := s.ListRange("/a/", ReadOptions{Revision: 3, Limit: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +288,7 @@ func TestListLimitCountAtRevision(t *testing.T) {
 		t.Fatalf("ListLimitAt rev=3: got %+v", kvs)
 	}
 
-	n, err := s.CountAt("/a/", 3)
+	n, err := s.CountRange("/a/", ReadOptions{Revision: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,12 +296,42 @@ func TestListLimitCountAtRevision(t *testing.T) {
 		t.Fatalf("CountAt rev=3: want 2 got %d", n)
 	}
 
-	kvs, err = s.ListAt("/a/", 5)
+	kvs, err = s.ListRange("/a/", ReadOptions{Revision: 5})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(kvs) != 2 || kvs[0].Key != "/a/1" || kvs[1].Key != "/a/3" {
 		t.Fatalf("ListAt rev=5: got %+v", kvs)
+	}
+}
+
+func TestListRangeAppliesFromKeyBeforeLimit(t *testing.T) {
+	s := openMem(t)
+	apply(t, s,
+		createEntry(1, "/page/1", []byte("1")),
+		createEntry(2, "/page/2", []byte("2")),
+		createEntry(3, "/page/3", []byte("3")),
+		createEntry(4, "/page/4", []byte("4")),
+	)
+
+	kvs, err := s.ListRange("/page/", ReadOptions{
+		Revision: 4,
+		FromKey:  "/page/3",
+		Limit:    2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kvs) != 2 || kvs[0].Key != "/page/3" || kvs[1].Key != "/page/4" {
+		t.Fatalf("ListRange fromKey+limit: got %+v", kvs)
+	}
+
+	n, err := s.CountRange("/page/", ReadOptions{Revision: 4, FromKey: "/page/3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("CountRange fromKey: want 2 got %d", n)
 	}
 }
 
