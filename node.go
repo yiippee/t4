@@ -25,10 +25,11 @@ import (
 
 // Sentinel errors.
 var (
-	ErrKeyExists = errors.New("t4: key already exists")
-	ErrNotLeader = errors.New("t4: this node is not the leader; writes are rejected")
-	ErrClosed    = errors.New("t4: node is closed")
-	ErrCompacted = errors.New("t4: required revision has been compacted")
+	ErrKeyExists      = errors.New("t4: key already exists")
+	ErrNotLeader      = errors.New("t4: this node is not the leader; writes are rejected")
+	ErrClosed         = errors.New("t4: node is closed")
+	ErrCompacted      = istore.ErrCompacted
+	ErrFutureRevision = istore.ErrFutureRevision
 )
 
 // TxnCondTarget identifies which field of a key's metadata is compared.
@@ -870,49 +871,92 @@ func (n *Node) syncWithLeader(ctx context.Context) error {
 	return nil
 }
 
+// ReadOption configures an optional read parameter on Get/Exists/List/Count
+// and their Linearizable variants. Construct with WithRevision / WithFromKey
+// / WithLimit.
+type ReadOption func(*readOpts)
+
+type readOpts struct {
+	revision int64
+	fromKey  string
+	limit    int64
+}
+
+func (o readOpts) hasRevision() bool { return o.revision > 0 }
+func (o readOpts) storeOptions() istore.ReadOptions {
+	return istore.ReadOptions{
+		Revision: o.revision,
+		FromKey:  o.fromKey,
+		Limit:    o.limit,
+	}
+}
+
+func applyReadOpts(opts []ReadOption) readOpts {
+	var o readOpts
+	for _, fn := range opts {
+		fn(&o)
+	}
+	return o
+}
+
+// WithRevision reads as of the given revision. A revision of 0 (the default)
+// reads HEAD. Reads strictly below the store's CompactRevision return
+// ErrCompacted; reads above CurrentRevision return ErrFutureRevision.
+func WithRevision(rev int64) ReadOption {
+	return func(o *readOpts) { o.revision = rev }
+}
+
+// WithFromKey filters List/Count results to keys whose name is
+// lexicographically >= fromKey. fromKey == "" disables the filter.
+//
+// Used by paginated lists to compute "items remaining after this page"
+// without double-counting keys before the continuation point.
+func WithFromKey(k string) ReadOption {
+	return func(o *readOpts) { o.fromKey = k }
+}
+
+// WithLimit caps List results to at most n entries. limit <= 0 (the default)
+// returns all matching entries.
+func WithLimit(n int64) ReadOption {
+	return func(o *readOpts) { o.limit = n }
+}
+
 // LinearizableGet returns the value for key with linearizability guaranteed.
 // On a follower it syncs to the leader's revision before serving locally.
-func (n *Node) LinearizableGet(ctx context.Context, key string) (*KeyValue, error) {
+func (n *Node) LinearizableGet(ctx context.Context, key string, opts ...ReadOption) (*KeyValue, error) {
 	if err := n.syncWithLeader(ctx); err != nil {
 		return nil, err
 	}
-	return n.Get(key)
+	return n.Get(key, opts...)
 }
 
 // LinearizableExists reports whether key exists with linearizability guaranteed.
-func (n *Node) LinearizableExists(ctx context.Context, key string) (bool, error) {
+func (n *Node) LinearizableExists(ctx context.Context, key string, opts ...ReadOption) (bool, error) {
 	if err := n.syncWithLeader(ctx); err != nil {
 		return false, err
 	}
-	return n.Exists(key)
+	return n.Exists(key, opts...)
 }
 
-// LinearizableList returns all keys with the given prefix with linearizability guaranteed.
-func (n *Node) LinearizableList(ctx context.Context, prefix string) ([]*KeyValue, error) {
+// LinearizableList returns keys with the given prefix with linearizability
+// guaranteed. Use WithFromKey / WithLimit / WithRevision to refine.
+func (n *Node) LinearizableList(ctx context.Context, prefix string, opts ...ReadOption) ([]*KeyValue, error) {
 	if err := n.syncWithLeader(ctx); err != nil {
 		return nil, err
 	}
-	return n.List(prefix)
+	return n.List(prefix, opts...)
 }
 
-// LinearizableListLimit returns up to limit keys with the given prefix with
-// linearizability guaranteed. A limit <= 0 returns all matching keys.
-func (n *Node) LinearizableListLimit(ctx context.Context, prefix string, limit int64) ([]*KeyValue, error) {
-	if err := n.syncWithLeader(ctx); err != nil {
-		return nil, err
-	}
-	return n.ListLimit(prefix, limit)
-}
-
-// LinearizableCount returns the count of keys with the given prefix with linearizability guaranteed.
-func (n *Node) LinearizableCount(ctx context.Context, prefix string) (int64, error) {
+// LinearizableCount returns the count of keys with the given prefix with
+// linearizability guaranteed. Use WithFromKey / WithRevision to refine.
+func (n *Node) LinearizableCount(ctx context.Context, prefix string, opts ...ReadOption) (int64, error) {
 	if err := n.syncWithLeader(ctx); err != nil {
 		return 0, err
 	}
-	return n.Count(prefix)
+	return n.Count(prefix, opts...)
 }
 
-func (n *Node) Get(key string) (*KeyValue, error) {
+func (n *Node) Get(key string, opts ...ReadOption) (*KeyValue, error) {
 	if n.closed.Load() {
 		return nil, ErrClosed
 	}
@@ -921,14 +965,21 @@ func (n *Node) Get(key string) (*KeyValue, error) {
 	if n.closed.Load() {
 		return nil, ErrClosed
 	}
-	sv, err := n.db.Load().Get(key)
+	o := applyReadOpts(opts)
+	var sv *istore.KeyValue
+	var err error
+	if o.hasRevision() {
+		sv, err = n.db.Load().GetAt(key, o.revision)
+	} else {
+		sv, err = n.db.Load().Get(key)
+	}
 	if err != nil || sv == nil {
 		return nil, err
 	}
 	return toKV(sv), nil
 }
 
-func (n *Node) Exists(key string) (bool, error) {
+func (n *Node) Exists(key string, opts ...ReadOption) (bool, error) {
 	if n.closed.Load() {
 		return false, ErrClosed
 	}
@@ -936,17 +987,15 @@ func (n *Node) Exists(key string) (bool, error) {
 	defer n.readMu.RUnlock()
 	if n.closed.Load() {
 		return false, ErrClosed
+	}
+	o := applyReadOpts(opts)
+	if o.hasRevision() {
+		return n.db.Load().ExistsAt(key, o.revision)
 	}
 	return n.db.Load().Exists(key)
 }
 
-func (n *Node) List(prefix string) ([]*KeyValue, error) {
-	return n.ListLimit(prefix, 0)
-}
-
-// ListLimit returns up to limit keys with the given prefix. A limit <= 0 returns
-// all matching keys.
-func (n *Node) ListLimit(prefix string, limit int64) ([]*KeyValue, error) {
+func (n *Node) List(prefix string, opts ...ReadOption) ([]*KeyValue, error) {
 	if n.closed.Load() {
 		return nil, ErrClosed
 	}
@@ -955,7 +1004,8 @@ func (n *Node) ListLimit(prefix string, limit int64) ([]*KeyValue, error) {
 	if n.closed.Load() {
 		return nil, ErrClosed
 	}
-	svs, err := n.db.Load().ListLimit(prefix, limit)
+	o := applyReadOpts(opts)
+	svs, err := n.db.Load().ListRange(prefix, o.storeOptions())
 	if err != nil {
 		return nil, err
 	}
@@ -966,11 +1016,23 @@ func (n *Node) ListLimit(prefix string, limit int64) ([]*KeyValue, error) {
 	return out, nil
 }
 
-func (n *Node) Count(prefix string) (int64, error) { return n.db.Load().Count(prefix) }
-func (n *Node) CurrentRevision() int64             { return n.db.Load().CurrentRevision() }
-func (n *Node) CompactRevision() int64             { return n.db.Load().CompactRevision() }
-func (n *Node) Config() Config                     { return n.cfg }
-func (n *Node) IsLeader() bool                     { return n.loadRole() != roleFollower }
+func (n *Node) Count(prefix string, opts ...ReadOption) (int64, error) {
+	if n.closed.Load() {
+		return 0, ErrClosed
+	}
+	n.readMu.RLock()
+	defer n.readMu.RUnlock()
+	if n.closed.Load() {
+		return 0, ErrClosed
+	}
+	o := applyReadOpts(opts)
+	return n.db.Load().CountRange(prefix, o.storeOptions())
+}
+
+func (n *Node) CurrentRevision() int64 { return n.db.Load().CurrentRevision() }
+func (n *Node) CompactRevision() int64 { return n.db.Load().CompactRevision() }
+func (n *Node) Config() Config         { return n.cfg }
+func (n *Node) IsLeader() bool         { return n.loadRole() != roleFollower }
 
 func (n *Node) WaitForRevision(ctx context.Context, rev int64) error {
 	if n.closed.Load() {

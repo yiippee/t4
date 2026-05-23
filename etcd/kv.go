@@ -2,9 +2,11 @@ package etcd
 
 import (
 	"context"
+	"errors"
 
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -15,6 +17,12 @@ import (
 func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcdserverpb.RangeResponse, error) {
 	key := string(r.Key)
 	rangeEnd := string(r.RangeEnd)
+	readRev := fromEtcdRevision(r.Revision)
+	header := func() *etcdserverpb.ResponseHeader { return s.rangeHeader(readRev) }
+
+	if r.Revision > 0 && readRev == 0 {
+		return &etcdserverpb.RangeResponse{Header: s.headerAt(0)}, nil
+	}
 
 	// A read is linearizable when the client requests it AND the server is not
 	// configured to force serializable reads.
@@ -23,7 +31,7 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 	// Single-key lookup.
 	if rangeEnd == "" {
 		if isInternalKey(key) {
-			return &etcdserverpb.RangeResponse{Header: s.header()}, nil
+			return &etcdserverpb.RangeResponse{Header: header()}, nil
 		}
 		if r.CountOnly {
 			var (
@@ -31,32 +39,32 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 				err    error
 			)
 			if linearizable {
-				exists, err = s.node.LinearizableExists(ctx, key)
+				exists, err = s.node.LinearizableExists(ctx, key, t4.WithRevision(readRev))
 			} else {
-				exists, err = s.node.Exists(key)
+				exists, err = s.node.Exists(key, t4.WithRevision(readRev))
 			}
 			if err != nil {
-				return nil, err
+				return nil, rangeReadError(err)
 			}
 			count := int64(0)
 			if exists {
 				count = 1
 			}
-			return &etcdserverpb.RangeResponse{Header: s.header(), Count: count}, nil
+			return &etcdserverpb.RangeResponse{Header: header(), Count: count}, nil
 		}
 		var (
 			kv  *t4.KeyValue
 			err error
 		)
 		if linearizable {
-			kv, err = s.node.LinearizableGet(ctx, key)
+			kv, err = s.node.LinearizableGet(ctx, key, t4.WithRevision(readRev))
 		} else {
-			kv, err = s.node.Get(key)
+			kv, err = s.node.Get(key, t4.WithRevision(readRev))
 		}
 		if err != nil {
-			return nil, err
+			return nil, rangeReadError(err)
 		}
-		resp := &etcdserverpb.RangeResponse{Header: s.header()}
+		resp := &etcdserverpb.RangeResponse{Header: header()}
 		if kv != nil {
 			resp.Kvs = []*mvccpb.KeyValue{kvToProtoForRange(kv, r.KeysOnly)}
 			resp.Count = 1
@@ -75,14 +83,14 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 				err   error
 			)
 			if linearizable {
-				count, err = s.node.LinearizableCount(ctx, scanPrefix)
+				count, err = s.node.LinearizableCount(ctx, scanPrefix, t4.WithRevision(readRev))
 			} else {
-				count, err = s.node.Count(scanPrefix)
+				count, err = s.node.Count(scanPrefix, t4.WithRevision(readRev))
 			}
 			if err != nil {
-				return nil, err
+				return nil, rangeReadError(err)
 			}
-			return &etcdserverpb.RangeResponse{Header: s.header(), Count: count}, nil
+			return &etcdserverpb.RangeResponse{Header: header(), Count: count}, nil
 		}
 
 		var (
@@ -90,12 +98,12 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 			err error
 		)
 		if linearizable {
-			all, err = s.node.LinearizableList(ctx, scanPrefix)
+			all, err = s.node.LinearizableList(ctx, scanPrefix, t4.WithRevision(readRev))
 		} else {
-			all, err = s.node.List(scanPrefix)
+			all, err = s.node.List(scanPrefix, t4.WithRevision(readRev))
 		}
 		if err != nil {
-			return nil, err
+			return nil, rangeReadError(err)
 		}
 		var count int64
 		for _, kv := range all {
@@ -104,7 +112,7 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 			}
 			count++
 		}
-		return &etcdserverpb.RangeResponse{Header: s.header(), Count: count}, nil
+		return &etcdserverpb.RangeResponse{Header: header(), Count: count}, nil
 	}
 
 	var (
@@ -114,27 +122,27 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 	if isExactPrefixRange(key, rangeEnd) && r.Limit > 0 {
 		var total int64
 		if linearizable {
-			total, err = s.node.LinearizableCount(ctx, scanPrefix)
+			total, err = s.node.LinearizableCount(ctx, scanPrefix, t4.WithRevision(readRev))
 		} else {
-			total, err = s.node.Count(scanPrefix)
+			total, err = s.node.Count(scanPrefix, t4.WithRevision(readRev))
 		}
 		if err != nil {
-			return nil, err
+			return nil, rangeReadError(err)
 		}
 		if linearizable {
-			all, err = s.node.LinearizableListLimit(ctx, scanPrefix, r.Limit)
+			all, err = s.node.LinearizableList(ctx, scanPrefix, t4.WithLimit(r.Limit), t4.WithRevision(readRev))
 		} else {
-			all, err = s.node.ListLimit(scanPrefix, r.Limit)
+			all, err = s.node.List(scanPrefix, t4.WithLimit(r.Limit), t4.WithRevision(readRev))
 		}
 		if err != nil {
-			return nil, err
+			return nil, rangeReadError(err)
 		}
 		kvs := make([]*mvccpb.KeyValue, 0, len(all))
 		for _, kv := range all {
 			kvs = append(kvs, kvToProtoForRange(kv, r.KeysOnly))
 		}
 		return &etcdserverpb.RangeResponse{
-			Header: s.header(),
+			Header: header(),
 			Kvs:    kvs,
 			Count:  total,
 			More:   total > r.Limit,
@@ -142,12 +150,12 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 	}
 
 	if linearizable {
-		all, err = s.node.LinearizableList(ctx, scanPrefix)
+		all, err = s.node.LinearizableList(ctx, scanPrefix, t4.WithRevision(readRev))
 	} else {
-		all, err = s.node.List(scanPrefix)
+		all, err = s.node.List(scanPrefix, t4.WithRevision(readRev))
 	}
 	if err != nil {
-		return nil, err
+		return nil, rangeReadError(err)
 	}
 
 	total := int64(0)
@@ -164,7 +172,7 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 	}
 
 	return &etcdserverpb.RangeResponse{
-		Header: s.header(),
+		Header: header(),
 		Kvs:    kvs,
 		Count:  total,
 		More:   r.Limit > 0 && total > r.Limit,
@@ -494,6 +502,24 @@ func (s *Server) Compact(ctx context.Context, r *etcdserverpb.CompactionRequest)
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+func (s *Server) rangeHeader(readRev int64) *etcdserverpb.ResponseHeader {
+	if readRev > 0 {
+		return s.headerAt(readRev)
+	}
+	return s.header()
+}
+
+func rangeReadError(err error) error {
+	switch {
+	case errors.Is(err, t4.ErrCompacted):
+		return rpctypes.ErrGRPCCompacted
+	case errors.Is(err, t4.ErrFutureRevision):
+		return rpctypes.ErrGRPCFutureRev
+	default:
+		return err
+	}
+}
 
 func kvToProtoForRange(kv *t4.KeyValue, keysOnly bool) *mvccpb.KeyValue {
 	pb := kvToProto(kv)

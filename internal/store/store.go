@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,8 +21,12 @@ type logger interface {
 	Warnf(format string, args ...interface{})
 }
 
-// ErrClosed is returned by WaitForRevision when the store has been closed.
-var ErrClosed = errors.New("store: closed")
+// Sentinel read errors.
+var (
+	ErrClosed         = errors.New("store: closed")
+	ErrCompacted      = errors.New("store: required revision has been compacted")
+	ErrFutureRevision = errors.New("store: required revision is a future revision")
+)
 
 // Store is the Pebble-backed state machine.
 //
@@ -177,7 +182,7 @@ func (s *Store) loadMeta() error {
 	if err != nil {
 		return fmt.Errorf("store: new iter for loadMeta: %w", err)
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 	if iter.Last() {
 		s.currentRev = decodeLogKey(iter.Key())
 	}
@@ -439,30 +444,31 @@ func (s *Store) applyCompact(b *pebble.Batch, compactRev int64) error {
 	lo := logKey(atomic.LoadInt64(&s.compactRev))
 	hi := logKey(compactRev)
 
-	// Scan log entries in [lo, hi) and delete only those that are safe to
-	// remove. A log entry at revision R for key K is safe to delete when:
-	//   (a) the entry is a delete operation (key no longer exists), or
-	//   (b) the index for K points to a revision > R (key has since been updated).
-	// Entries where the index still points to R are the current value of a live
-	// key and must be preserved, otherwise a subsequent Get would fail with
-	// "pebble: not found" for a key that still exists.
+	// Scan old compacted log entries and delete only versions that have a
+	// later version at or before the new compact watermark. The newest entry at
+	// or before compactRev for each key must be preserved: it is still visible
+	// to reads just after the compacted range until that key changes again.
 	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
 	if err != nil {
 		return fmt.Errorf("store: compact iter: %w", err)
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
 	for iter.First(); iter.Valid(); iter.Next() {
 		entryRev := decodeLogKey(iter.Key())
 		r, err := unmarshalRecord(iter.Value())
-		if err == nil && !r.delete {
-			idxRev, err := s.getIdxRev(r.key)
-			if err != nil {
-				return fmt.Errorf("store: compact idx lookup %q: %w", r.key, err)
-			}
-			if idxRev == entryRev {
-				continue // live key at its current revision — keep
-			}
+		if err != nil {
+			return fmt.Errorf("store: compact decode rev=%d: %w", entryRev, err)
+		}
+		hasLater, err := s.hasLaterRevisionAtOrBefore(r.key, entryRev, compactRev)
+		if err != nil {
+			return err
+		}
+		if !hasLater {
+			// Keep the newest entry at or before compactRev for each key. It is
+			// still needed to reconstruct reads at revisions after compactRev
+			// until that key changes again.
+			continue
 		}
 		if err := b.Delete(iter.Key(), pebble.NoSync); err != nil {
 			return fmt.Errorf("store: compact delete rev=%d: %w", entryRev, err)
@@ -474,6 +480,30 @@ func (s *Store) applyCompact(b *pebble.Batch, compactRev int64) error {
 
 	atomic.StoreInt64(&s.compactRev, compactRev)
 	return nil
+}
+
+func (s *Store) hasLaterRevisionAtOrBefore(key string, afterRev, beforeOrEqualRev int64) (bool, error) {
+	if afterRev >= beforeOrEqualRev {
+		return false, nil
+	}
+	iter, err := s.db.NewIter(&pebble.IterOptions{
+		LowerBound: logKey(afterRev + 1),
+		UpperBound: logKey(beforeOrEqualRev + 1),
+	})
+	if err != nil {
+		return false, fmt.Errorf("store: compact later-revision iter: %w", err)
+	}
+	defer func() { _ = iter.Close() }()
+	for iter.First(); iter.Valid(); iter.Next() {
+		r, err := unmarshalRecord(iter.Value())
+		if err != nil {
+			return false, fmt.Errorf("store: compact later-revision decode: %w", err)
+		}
+		if r.key == key {
+			return true, nil
+		}
+	}
+	return false, iter.Error()
 }
 
 // broadcast replaces the notify channel, waking all current waiters.
@@ -533,6 +563,14 @@ type KeyValue struct {
 	Lease          int64
 }
 
+// ReadOptions refines store reads. Zero values mean HEAD, no lower key bound,
+// and no limit.
+type ReadOptions struct {
+	Revision int64
+	FromKey  string
+	Limit    int64
+}
+
 // Get returns the current value of key, or nil if not found.
 func (s *Store) Get(key string) (*KeyValue, error) {
 	rev, err := s.getIdxRev(key)
@@ -542,6 +580,18 @@ func (s *Store) Get(key string) (*KeyValue, error) {
 	return s.getLogEntry(key, rev)
 }
 
+// GetAt returns the value of key as of revision. A revision of 0 means current.
+func (s *Store) GetAt(key string, revision int64) (*KeyValue, error) {
+	targetRev, err := s.resolveReadRevision(revision)
+	if err != nil {
+		return nil, err
+	}
+	if revision == 0 {
+		return s.Get(key)
+	}
+	return s.getAtRevision(key, targetRev)
+}
+
 // Exists reports whether key is currently live without loading its value.
 func (s *Store) Exists(key string) (bool, error) {
 	rev, err := s.getIdxRev(key)
@@ -549,6 +599,33 @@ func (s *Store) Exists(key string) (bool, error) {
 		return false, err
 	}
 	return rev != 0, nil
+}
+
+// ExistsAt reports whether key was live as of revision. A revision of 0 means current.
+func (s *Store) ExistsAt(key string, revision int64) (bool, error) {
+	if revision == 0 {
+		return s.Exists(key)
+	}
+	kv, err := s.GetAt(key, revision)
+	return kv != nil, err
+}
+
+func (s *Store) resolveReadRevision(revision int64) (int64, error) {
+	currentRev := atomic.LoadInt64(&s.currentRev)
+	if revision == 0 {
+		return currentRev, nil
+	}
+	// etcd convention: Compact(N) preserves data at rev=N; only reads
+	// strictly below N are rejected. (Distinct from the Watch path, where
+	// startRev == compactRev is also rejected — events at and below
+	// compactRev are not retained.)
+	if compactRev := atomic.LoadInt64(&s.compactRev); compactRev > 0 && revision < compactRev {
+		return 0, ErrCompacted
+	}
+	if revision > currentRev {
+		return 0, ErrFutureRevision
+	}
+	return revision, nil
 }
 
 func (s *Store) getIdxRev(key string) (int64, error) {
@@ -594,7 +671,7 @@ func (s *Store) getLogEntry(key string, rev int64) (*KeyValue, error) {
 	if iterErr != nil {
 		return nil, fmt.Errorf("store: get log txn scan rev=%d: %w", rev, iterErr)
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 	for iter.First(); iter.Valid(); iter.Next() {
 		r, rerr := unmarshalRecord(iter.Value())
 		if rerr != nil {
@@ -614,6 +691,40 @@ func (s *Store) getLogEntry(key string, rev int64) (*KeyValue, error) {
 	return nil, fmt.Errorf("store: get log rev=%d key=%q: not found in txn sub-ops", rev, key)
 }
 
+func (s *Store) getAtRevision(key string, targetRev int64) (*KeyValue, error) {
+	iter, err := s.db.NewIter(&pebble.IterOptions{
+		LowerBound: logLower,
+		UpperBound: logKey(targetRev + 1),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("store: get-at iter: %w", err)
+	}
+	defer func() { _ = iter.Close() }()
+
+	for iter.Last(); iter.Valid(); iter.Prev() {
+		rev := decodeLogKey(iter.Key())
+		r, err := unmarshalRecord(iter.Value())
+		if err != nil {
+			return nil, err
+		}
+		if r.key != key {
+			continue
+		}
+		if r.delete {
+			return nil, nil
+		}
+		return &KeyValue{
+			Key:            r.key,
+			Value:          r.value,
+			Revision:       rev,
+			CreateRevision: r.createRevision,
+			PrevRevision:   r.prevRevision,
+			Lease:          r.lease,
+		}, nil
+	}
+	return nil, iter.Error()
+}
+
 // List returns all live keys with the given prefix, sorted lexicographically.
 // If prefix is empty, all keys are returned.
 func (s *Store) List(prefix string) ([]*KeyValue, error) {
@@ -623,7 +734,59 @@ func (s *Store) List(prefix string) ([]*KeyValue, error) {
 // ListLimit returns up to limit live keys with the given prefix. A limit <= 0
 // returns all matching keys.
 func (s *Store) ListLimit(prefix string, limit int64) ([]*KeyValue, error) {
+	return s.ListRange(prefix, ReadOptions{Limit: limit})
+}
+
+// ListRange returns live keys matching prefix and opts, sorted lexicographically.
+func (s *Store) ListRange(prefix string, opts ReadOptions) ([]*KeyValue, error) {
+	targetRev, err := s.resolveReadRevision(opts.Revision)
+	if err != nil {
+		return nil, err
+	}
+	if opts.Revision == 0 {
+		return s.listCurrent(prefix, opts.FromKey, opts.Limit)
+	}
+
+	events, _, err := s.scanLog(prefix, 1, targetRev, false)
+	if err != nil {
+		return nil, err
+	}
+	latest := make(map[string]*KeyValue)
+	for _, ev := range events {
+		if ev.Type == EventDelete {
+			delete(latest, ev.KV.Key)
+			continue
+		}
+		latest[ev.KV.Key] = ev.KV
+	}
+
+	keys := make([]string, 0, len(latest))
+	for key := range latest {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	out := make([]*KeyValue, 0, len(keys))
+	for _, key := range keys {
+		if opts.FromKey != "" && key < opts.FromKey {
+			continue
+		}
+		if opts.Limit > 0 && int64(len(out)) >= opts.Limit {
+			break
+		}
+		out = append(out, latest[key])
+	}
+	return out, nil
+}
+
+func (s *Store) listCurrent(prefix, fromKey string, limit int64) ([]*KeyValue, error) {
 	lower := idxKey(prefix)
+	if fromKey != "" {
+		fromLower := idxKey(fromKey)
+		if string(fromLower) > string(lower) {
+			lower = fromLower
+		}
+	}
 	upper := idxKeyUpper(prefix)
 
 	iter, err := s.db.NewIter(&pebble.IterOptions{
@@ -633,7 +796,7 @@ func (s *Store) ListLimit(prefix string, limit int64) ([]*KeyValue, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: list iter: %w", err)
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
 	var out []*KeyValue
 	for iter.First(); iter.Valid(); iter.Next() {
@@ -653,18 +816,40 @@ func (s *Store) ListLimit(prefix string, limit int64) ([]*KeyValue, error) {
 
 // Count returns the number of live keys with the given prefix.
 func (s *Store) Count(prefix string) (int64, error) {
-	lower := idxKey(prefix)
-	upper := idxKeyUpper(prefix)
+	return s.CountRange(prefix, ReadOptions{})
+}
 
+// CountRange returns the number of live keys matching prefix and opts.
+func (s *Store) CountRange(prefix string, opts ReadOptions) (int64, error) {
+	if opts.Revision == 0 {
+		return s.countCurrent(prefix, opts.FromKey)
+	}
+	kvs, err := s.ListRange(prefix, ReadOptions{Revision: opts.Revision, FromKey: opts.FromKey})
+	if err != nil {
+		return 0, err
+	}
+	return int64(len(kvs)), nil
+}
+
+// countCurrent counts live keys with prefix at HEAD whose key is
+// lexicographically >= fromKey when fromKey is set.
+func (s *Store) countCurrent(prefix, fromKey string) (int64, error) {
+	lower := idxKey(prefix)
+	if fromKey != "" {
+		fromLower := idxKey(fromKey)
+		if string(fromLower) > string(lower) {
+			lower = fromLower
+		}
+	}
+	upper := idxKeyUpper(prefix)
 	iter, err := s.db.NewIter(&pebble.IterOptions{
 		LowerBound: lower,
 		UpperBound: upper,
 	})
 	if err != nil {
-		return 0, fmt.Errorf("store: count iter: %w", err)
+		return 0, fmt.Errorf("store: count-from iter: %w", err)
 	}
-	defer iter.Close()
-
+	defer func() { _ = iter.Close() }()
 	var n int64
 	for iter.First(); iter.Valid(); iter.Next() {
 		n++
@@ -833,7 +1018,7 @@ func (s *Store) scanLog(prefix string, fromRev, toRev int64, withPrevKV bool) ([
 	if err != nil {
 		return nil, 0, fmt.Errorf("store: scan log iter: %w", err)
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
 	var events []Event
 	var scanned int

@@ -28,8 +28,8 @@ const (
 // node is the subset of t4.Node used by Store.
 type node interface {
 	Put(ctx context.Context, key string, value []byte, lease int64) (int64, error)
-	Get(key string) (*t4.KeyValue, error)
-	List(prefix string) ([]*t4.KeyValue, error)
+	Get(key string, opts ...t4.ReadOption) (*t4.KeyValue, error)
+	List(prefix string, opts ...t4.ReadOption) ([]*t4.KeyValue, error)
 	Delete(ctx context.Context, key string) (int64, error)
 }
 
