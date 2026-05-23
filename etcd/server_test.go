@@ -119,6 +119,53 @@ func TestRangePrefix(t *testing.T) {
 	}
 }
 
+func TestRangeAtRevisionSingleKey(t *testing.T) {
+	srv := newServer(t)
+	ctx := context.Background()
+
+	oldRev := put(t, srv, "/mvcc/key", "old")
+	put(t, srv, "/mvcc/key", "new")
+
+	r, err := srv.Range(ctx, &etcdserverpb.RangeRequest{
+		Key:      []byte("/mvcc/key"),
+		Revision: oldRev,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Header.Revision != oldRev {
+		t.Fatalf("header revision: want %d got %d", oldRev, r.Header.Revision)
+	}
+	if len(r.Kvs) != 1 || string(r.Kvs[0].Value) != "old" {
+		t.Fatalf("Range at old revision: got %+v", r.Kvs)
+	}
+}
+
+func TestRangeAtRevisionPrefixIsStable(t *testing.T) {
+	srv := newServer(t)
+	ctx := context.Background()
+
+	put(t, srv, "/stable/1", "1")
+	fixedRev := put(t, srv, "/stable/2", "2")
+	put(t, srv, "/stable/3", "3")
+
+	r, err := srv.Range(ctx, &etcdserverpb.RangeRequest{
+		Key:      []byte("/stable/"),
+		RangeEnd: []byte("/stable0"),
+		Limit:    1,
+		Revision: fixedRev,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Count != 2 || !r.More {
+		t.Fatalf("paged range at fixed rev: count=%d more=%v", r.Count, r.More)
+	}
+	if len(r.Kvs) != 1 || string(r.Kvs[0].Key) != "/stable/1" {
+		t.Fatalf("paged range at fixed rev: got %+v", r.Kvs)
+	}
+}
+
 func TestRangeFromKeyIsNotTreatedAsPrefix(t *testing.T) {
 	srv := newServer(t)
 	ctx := context.Background()

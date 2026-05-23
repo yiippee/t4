@@ -158,6 +158,39 @@ func TestGetAfterDelete(t *testing.T) {
 	}
 }
 
+func TestGetAtRevision(t *testing.T) {
+	s := openMem(t)
+	apply(t, s,
+		createEntry(1, "k", []byte("v1")),
+		updateEntry(3, "k", []byte("v3"), 1, 1),
+		deleteEntry(5, "k", 1, 3),
+	)
+
+	kv, err := s.GetAt("k", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kv == nil || string(kv.Value) != "v1" || kv.Revision != 1 {
+		t.Fatalf("GetAt rev=2: got %+v", kv)
+	}
+
+	kv, err = s.GetAt("k", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kv == nil || string(kv.Value) != "v3" || kv.Revision != 3 {
+		t.Fatalf("GetAt rev=4: got %+v", kv)
+	}
+
+	kv, err = s.GetAt("k", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kv != nil {
+		t.Fatalf("GetAt rev=5: want nil after delete, got %+v", kv)
+	}
+}
+
 func TestExists(t *testing.T) {
 	s := openMem(t)
 	apply(t, s, createEntry(1, "k", []byte("v")))
@@ -237,6 +270,41 @@ func TestListAfterDelete(t *testing.T) {
 	}
 }
 
+func TestListLimitCountAtRevision(t *testing.T) {
+	s := openMem(t)
+	apply(t, s,
+		createEntry(1, "/a/1", []byte("1")),
+		createEntry(2, "/a/2", []byte("2")),
+		updateEntry(3, "/a/1", []byte("1b"), 1, 1),
+		createEntry(4, "/a/3", []byte("3")),
+		deleteEntry(5, "/a/2", 2, 2),
+	)
+
+	kvs, err := s.ListLimitAt("/a/", 2, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kvs) != 2 || kvs[0].Key != "/a/1" || string(kvs[0].Value) != "1b" || kvs[1].Key != "/a/2" {
+		t.Fatalf("ListLimitAt rev=3: got %+v", kvs)
+	}
+
+	n, err := s.CountAt("/a/", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("CountAt rev=3: want 2 got %d", n)
+	}
+
+	kvs, err = s.ListAt("/a/", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kvs) != 2 || kvs[0].Key != "/a/1" || kvs[1].Key != "/a/3" {
+		t.Fatalf("ListAt rev=5: got %+v", kvs)
+	}
+}
+
 // ── Count ────────────────────────────────────────────────────────────────────
 
 func TestCount(t *testing.T) {
@@ -289,6 +357,28 @@ func TestCompact(t *testing.T) {
 	}
 	if string(kv.Value) != "v3" {
 		t.Errorf("value after compact: want v3 got %q", kv.Value)
+	}
+}
+
+func TestCompactPreservesVersionVisibleAfterCompactRevision(t *testing.T) {
+	s := openMem(t)
+	apply(t, s,
+		createEntry(1, "k", []byte("v1")),
+		updateEntry(5, "k", []byte("v5"), 1, 1),
+	)
+	apply(t, s, wal.Entry{
+		Revision:     6,
+		Term:         1,
+		Op:           wal.OpCompact,
+		PrevRevision: 3,
+	})
+
+	kv, err := s.GetAt("k", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kv == nil || string(kv.Value) != "v1" || kv.Revision != 1 {
+		t.Fatalf("GetAt rev=4 after compact: got %+v", kv)
 	}
 }
 

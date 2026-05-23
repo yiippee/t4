@@ -25,10 +25,11 @@ import (
 
 // Sentinel errors.
 var (
-	ErrKeyExists = errors.New("t4: key already exists")
-	ErrNotLeader = errors.New("t4: this node is not the leader; writes are rejected")
-	ErrClosed    = errors.New("t4: node is closed")
-	ErrCompacted = errors.New("t4: required revision has been compacted")
+	ErrKeyExists      = errors.New("t4: key already exists")
+	ErrNotLeader      = errors.New("t4: this node is not the leader; writes are rejected")
+	ErrClosed         = errors.New("t4: node is closed")
+	ErrCompacted      = istore.ErrCompacted
+	ErrFutureRevision = istore.ErrFutureRevision
 )
 
 // TxnCondTarget identifies which field of a key's metadata is compared.
@@ -872,47 +873,47 @@ func (n *Node) syncWithLeader(ctx context.Context) error {
 
 // LinearizableGet returns the value for key with linearizability guaranteed.
 // On a follower it syncs to the leader's revision before serving locally.
-func (n *Node) LinearizableGet(ctx context.Context, key string) (*KeyValue, error) {
+func (n *Node) LinearizableGet(ctx context.Context, key string, revision ...int64) (*KeyValue, error) {
 	if err := n.syncWithLeader(ctx); err != nil {
 		return nil, err
 	}
-	return n.Get(key)
+	return n.Get(key, revision...)
 }
 
 // LinearizableExists reports whether key exists with linearizability guaranteed.
-func (n *Node) LinearizableExists(ctx context.Context, key string) (bool, error) {
+func (n *Node) LinearizableExists(ctx context.Context, key string, revision ...int64) (bool, error) {
 	if err := n.syncWithLeader(ctx); err != nil {
 		return false, err
 	}
-	return n.Exists(key)
+	return n.Exists(key, revision...)
 }
 
 // LinearizableList returns all keys with the given prefix with linearizability guaranteed.
-func (n *Node) LinearizableList(ctx context.Context, prefix string) ([]*KeyValue, error) {
+func (n *Node) LinearizableList(ctx context.Context, prefix string, revision ...int64) ([]*KeyValue, error) {
 	if err := n.syncWithLeader(ctx); err != nil {
 		return nil, err
 	}
-	return n.List(prefix)
+	return n.List(prefix, revision...)
 }
 
 // LinearizableListLimit returns up to limit keys with the given prefix with
 // linearizability guaranteed. A limit <= 0 returns all matching keys.
-func (n *Node) LinearizableListLimit(ctx context.Context, prefix string, limit int64) ([]*KeyValue, error) {
+func (n *Node) LinearizableListLimit(ctx context.Context, prefix string, limit int64, revision ...int64) ([]*KeyValue, error) {
 	if err := n.syncWithLeader(ctx); err != nil {
 		return nil, err
 	}
-	return n.ListLimit(prefix, limit)
+	return n.ListLimit(prefix, limit, revision...)
 }
 
 // LinearizableCount returns the count of keys with the given prefix with linearizability guaranteed.
-func (n *Node) LinearizableCount(ctx context.Context, prefix string) (int64, error) {
+func (n *Node) LinearizableCount(ctx context.Context, prefix string, revision ...int64) (int64, error) {
 	if err := n.syncWithLeader(ctx); err != nil {
 		return 0, err
 	}
-	return n.Count(prefix)
+	return n.Count(prefix, revision...)
 }
 
-func (n *Node) Get(key string) (*KeyValue, error) {
+func (n *Node) Get(key string, revision ...int64) (*KeyValue, error) {
 	if n.closed.Load() {
 		return nil, ErrClosed
 	}
@@ -921,14 +922,20 @@ func (n *Node) Get(key string) (*KeyValue, error) {
 	if n.closed.Load() {
 		return nil, ErrClosed
 	}
-	sv, err := n.db.Load().Get(key)
+	var sv *istore.KeyValue
+	var err error
+	if rev := optionalRevision(revision); rev > 0 {
+		sv, err = n.db.Load().GetAt(key, rev)
+	} else {
+		sv, err = n.db.Load().Get(key)
+	}
 	if err != nil || sv == nil {
 		return nil, err
 	}
 	return toKV(sv), nil
 }
 
-func (n *Node) Exists(key string) (bool, error) {
+func (n *Node) Exists(key string, revision ...int64) (bool, error) {
 	if n.closed.Load() {
 		return false, ErrClosed
 	}
@@ -936,17 +943,20 @@ func (n *Node) Exists(key string) (bool, error) {
 	defer n.readMu.RUnlock()
 	if n.closed.Load() {
 		return false, ErrClosed
+	}
+	if rev := optionalRevision(revision); rev > 0 {
+		return n.db.Load().ExistsAt(key, rev)
 	}
 	return n.db.Load().Exists(key)
 }
 
-func (n *Node) List(prefix string) ([]*KeyValue, error) {
-	return n.ListLimit(prefix, 0)
+func (n *Node) List(prefix string, revision ...int64) ([]*KeyValue, error) {
+	return n.ListLimit(prefix, 0, revision...)
 }
 
 // ListLimit returns up to limit keys with the given prefix. A limit <= 0 returns
 // all matching keys.
-func (n *Node) ListLimit(prefix string, limit int64) ([]*KeyValue, error) {
+func (n *Node) ListLimit(prefix string, limit int64, revision ...int64) ([]*KeyValue, error) {
 	if n.closed.Load() {
 		return nil, ErrClosed
 	}
@@ -955,7 +965,13 @@ func (n *Node) ListLimit(prefix string, limit int64) ([]*KeyValue, error) {
 	if n.closed.Load() {
 		return nil, ErrClosed
 	}
-	svs, err := n.db.Load().ListLimit(prefix, limit)
+	var svs []*istore.KeyValue
+	var err error
+	if rev := optionalRevision(revision); rev > 0 {
+		svs, err = n.db.Load().ListLimitAt(prefix, limit, rev)
+	} else {
+		svs, err = n.db.Load().ListLimit(prefix, limit)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -966,11 +982,23 @@ func (n *Node) ListLimit(prefix string, limit int64) ([]*KeyValue, error) {
 	return out, nil
 }
 
-func (n *Node) Count(prefix string) (int64, error) { return n.db.Load().Count(prefix) }
-func (n *Node) CurrentRevision() int64             { return n.db.Load().CurrentRevision() }
-func (n *Node) CompactRevision() int64             { return n.db.Load().CompactRevision() }
-func (n *Node) Config() Config                     { return n.cfg }
-func (n *Node) IsLeader() bool                     { return n.loadRole() != roleFollower }
+func (n *Node) Count(prefix string, revision ...int64) (int64, error) {
+	if rev := optionalRevision(revision); rev > 0 {
+		return n.db.Load().CountAt(prefix, rev)
+	}
+	return n.db.Load().Count(prefix)
+}
+func (n *Node) CurrentRevision() int64 { return n.db.Load().CurrentRevision() }
+func (n *Node) CompactRevision() int64 { return n.db.Load().CompactRevision() }
+func (n *Node) Config() Config         { return n.cfg }
+func (n *Node) IsLeader() bool         { return n.loadRole() != roleFollower }
+
+func optionalRevision(revisions []int64) int64 {
+	if len(revisions) == 0 {
+		return 0
+	}
+	return revisions[0]
+}
 
 func (n *Node) WaitForRevision(ctx context.Context, rev int64) error {
 	if n.closed.Load() {
