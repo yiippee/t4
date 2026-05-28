@@ -314,6 +314,48 @@ func TestPreviousFollowerStartsAloneWithoutPreviousLeader(t *testing.T) {
 	}
 }
 
+// ── TestFollowerRequestsReturnNoLeaderWhileLeaderUnavailable ─────────────────
+
+func TestFollowerRequestsReturnNoLeaderWhileLeaderUnavailable(t *testing.T) {
+	store := object.NewMem()
+	leaderDir := t.TempDir()
+	followerDir := t.TempDir()
+	nodes := []*t4.Node{
+		openElectionTestNode(t, store, "node-a", leaderDir),
+		openElectionTestNode(t, store, "node-b", followerDir),
+	}
+
+	leader := waitForLeaderNode(t, nodes, 10*time.Second)
+	follower := findFollower(t, nodes, leader)
+	followerID, restartDir := "node-a", leaderDir
+	if follower == nodes[1] {
+		followerID, restartDir = "node-b", followerDir
+	}
+	if err := follower.Close(); err != nil {
+		t.Fatalf("close follower: %v", err)
+	}
+	if err := leader.Close(); err != nil {
+		t.Fatalf("close leader: %v", err)
+	}
+
+	restarted := openElectionTestNode(t, store, followerID, restartDir)
+	defer func() { _ = restarted.Close() }()
+
+	readCtx, readCancel := context.WithTimeout(context.Background(), time.Second)
+	_, readErr := restarted.LinearizableGet(readCtx, "/leader-change/probe")
+	readCancel()
+	if !errors.Is(readErr, t4.ErrNoLeader) {
+		t.Fatalf("LinearizableGet while leader unavailable = %v, want ErrNoLeader", readErr)
+	}
+
+	writeCtx, writeCancel := context.WithTimeout(context.Background(), time.Second)
+	_, writeErr := restarted.Put(writeCtx, "/leader-change/write", []byte("v"), 0)
+	writeCancel()
+	if !errors.Is(writeErr, t4.ErrNoLeader) {
+		t.Fatalf("Put while leader unavailable = %v, want ErrNoLeader", writeErr)
+	}
+}
+
 // ── TestLateNodeJoin ──────────────────────────────────────────────────────────
 
 // TestLateNodeJoin verifies that a node started after data has been written

@@ -13,6 +13,8 @@ import (
 
 	"github.com/cockroachdb/pebble"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/t4db/t4/internal/checkpoint"
 	"github.com/t4db/t4/internal/election"
@@ -27,6 +29,7 @@ import (
 var (
 	ErrKeyExists      = errors.New("t4: key already exists")
 	ErrNotLeader      = errors.New("t4: this node is not the leader; writes are rejected")
+	ErrNoLeader       = errors.New("t4: no leader")
 	ErrClosed         = errors.New("t4: node is closed")
 	ErrCompacted      = istore.ErrCompacted
 	ErrFutureRevision = istore.ErrFutureRevision
@@ -870,10 +873,16 @@ func (n *Node) syncWithLeader(ctx context.Context) error {
 		if n.bgCtx.Err() != nil {
 			return ErrClosed
 		}
+		if n.loadRole() == roleFollower {
+			return ErrNoLeader
+		}
 		return nil // leader or single-node — already up-to-date
 	}
 	resp, err := cli.ForwardWrite(ctx, &peer.ForwardRequest{Op: peer.ForwardGetRevision})
 	if err != nil {
+		if isLeaderUnavailable(err) {
+			return ErrNoLeader
+		}
 		return fmt.Errorf("t4: read sync: %w", err)
 	}
 	if err := n.WaitForRevision(ctx, resp.Revision); err != nil {
@@ -884,6 +893,10 @@ func (n *Node) syncWithLeader(ctx context.Context) error {
 		return fmt.Errorf("t4: read sync: wait for local revision %d: %w", resp.Revision, err)
 	}
 	return nil
+}
+
+func isLeaderUnavailable(err error) bool {
+	return peer.IsLeaderUnreachable(err) || peer.IsLeaderShutdown(err) || status.Code(err) == codes.Unavailable
 }
 
 // ReadOption configures an optional read parameter on Get/Exists/List/Count

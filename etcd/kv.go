@@ -209,7 +209,7 @@ func (s *Server) Put(ctx context.Context, r *etcdserverpb.PutRequest) (*etcdserv
 
 	commitRev, err := s.node.Put(ctx, key, r.Value, r.Lease)
 	if err != nil {
-		return nil, err
+		return nil, kvError(err)
 	}
 	resp.Header = s.headerAt(commitRev)
 	return resp, nil
@@ -237,7 +237,7 @@ func (s *Server) DeleteRange(ctx context.Context, r *etcdserverpb.DeleteRangeReq
 		}
 		newRev, err := s.node.Delete(ctx, key)
 		if err != nil {
-			return nil, err
+			return nil, kvError(err)
 		}
 		if newRev > 0 {
 			resp.Header = s.headerAt(newRev)
@@ -284,7 +284,7 @@ func (s *Server) DeleteRange(ctx context.Context, r *etcdserverpb.DeleteRangeReq
 		}
 		txnResp, err := s.node.Txn(ctx, t4.TxnRequest{Success: ops})
 		if err != nil {
-			return nil, err
+			return nil, kvError(err)
 		}
 		lastCommitRev = txnResp.Revision
 		for _, kv := range chunk {
@@ -323,7 +323,7 @@ func (s *Server) Txn(ctx context.Context, r *etcdserverpb.TxnRequest) (*etcdserv
 	// Convert both branches to t4 ops (write ops only).
 	successOps, err := convertWriteOps(r.Success)
 	if err != nil {
-		return nil, err
+		return nil, kvError(err)
 	}
 	failureOps, err := convertWriteOps(r.Failure)
 	if err != nil {
@@ -492,7 +492,7 @@ func (s *Server) buildTxnResponses(ctx context.Context, ops []*etcdserverpb.Requ
 // Compact implements KVServer.Compact.
 func (s *Server) Compact(ctx context.Context, r *etcdserverpb.CompactionRequest) (*etcdserverpb.CompactionResponse, error) {
 	if err := s.node.Compact(ctx, fromEtcdRevision(r.Revision)); err != nil {
-		return nil, err
+		return nil, kvError(err)
 	}
 	return &etcdserverpb.CompactionResponse{Header: s.header()}, nil
 }
@@ -507,7 +507,13 @@ func (s *Server) rangeHeader(readRev int64) *etcdserverpb.ResponseHeader {
 }
 
 func rangeReadError(err error) error {
+	return kvError(err)
+}
+
+func kvError(err error) error {
 	switch {
+	case errors.Is(err, t4.ErrNoLeader):
+		return rpctypes.ErrGRPCNoLeader
 	case errors.Is(err, t4.ErrCompacted):
 		return rpctypes.ErrGRPCCompacted
 	case errors.Is(err, t4.ErrFutureRevision):

@@ -124,11 +124,11 @@ func (c *Client) Follow(ctx context.Context, fromRev int64, walFn func([]wal.Ent
 		fromRev = nextSeq
 
 		if c.maxRetries > 0 && consecutiveFailures >= c.maxRetries {
-			c.log.Errorf("peer: leader unreachable after %d attempts", consecutiveFailures)
+			c.log.Debugf("peer: leader unreachable after %d attempts", consecutiveFailures)
 			return ErrLeaderUnreachable
 		}
 
-		c.log.Warnf("peer: stream error (attempt %d): %v", consecutiveFailures, err)
+		c.log.Debugf("peer: stream error (attempt %d): %v", consecutiveFailures, err)
 		select {
 		case <-time.After(FollowerRetryInterval):
 		case <-ctx.Done():
