@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -77,6 +78,24 @@ func TestCurrentRevision(t *testing.T) {
 	apply(t, s, updateEntry(2, "k", []byte("v2"), 1, 1))
 	if s.CurrentRevision() != 2 {
 		t.Errorf("want 2, got %d", s.CurrentRevision())
+	}
+}
+
+func TestClosedStoreRejectsReadyWaitAndWatch(t *testing.T) {
+	s, err := OpenMem()
+	if err != nil {
+		t.Fatalf("OpenMem: %v", err)
+	}
+	apply(t, s, createEntry(1, "k", []byte("v")))
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if err := s.WaitForRevision(context.Background(), 1); !errors.Is(err, ErrClosed) {
+		t.Fatalf("WaitForRevision after close = %v, want ErrClosed", err)
+	}
+	if _, err := s.Watch(context.Background(), "", 0, false); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Watch after close = %v, want ErrClosed", err)
 	}
 }
 

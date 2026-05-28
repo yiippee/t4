@@ -347,6 +347,18 @@ func TestNodeWatch(t *testing.T) {
 	}
 }
 
+func TestNodeWatchAfterCloseReturnsErrClosed(t *testing.T) {
+	n := openNode(t)
+	if err := n.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	ch, err := n.Watch(ctx(t), "/w/", 0)
+	if !errors.Is(err, t4.ErrClosed) {
+		t.Fatalf("Watch after Close = ch %v err %v, want ErrClosed", ch, err)
+	}
+}
+
 func TestNodeWatchPrevKV(t *testing.T) {
 	n := openNode(t)
 	c := ctx(t)
