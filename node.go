@@ -1102,6 +1102,14 @@ func WithPrevKV() WatchOption {
 // Watch streams prefix-matching events using etcd revision semantics:
 // startRev=0 means "from now"; startRev=N means replay from revision N (inclusive).
 func (n *Node) Watch(ctx context.Context, prefix string, startRev int64, opts ...WatchOption) (<-chan Event, error) {
+	if n.closed.Load() {
+		return nil, ErrClosed
+	}
+	n.readMu.RLock()
+	defer n.readMu.RUnlock()
+	if n.closed.Load() {
+		return nil, ErrClosed
+	}
 	var o watchOpts
 	for _, opt := range opts {
 		opt(&o)
@@ -1115,7 +1123,14 @@ func (n *Node) Watch(ctx context.Context, prefix string, startRev int64, opts ..
 	if startRev == 0 {
 		storeStartRev = n.db.Load().CurrentRevision()
 	}
-	return n.db.Load().Watch(ctx, prefix, storeStartRev, o.prevKV)
+	ch, err := n.db.Load().Watch(ctx, prefix, storeStartRev, o.prevKV)
+	if err != nil {
+		if errors.Is(err, istore.ErrClosed) {
+			return nil, ErrClosed
+		}
+		return nil, err
+	}
+	return ch, nil
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

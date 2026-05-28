@@ -49,6 +49,10 @@ type Store struct {
 	notify    chan struct{} // closed and replaced on each revision advance
 	closed    chan struct{} // closed once when Store.Close is called
 	closeOnce sync.Once
+
+	// watchMu serializes watch registration against Close. sync.WaitGroup
+	// requires Add not to race with Wait when the counter can be zero.
+	watchMu   sync.Mutex
 	watcherWg sync.WaitGroup // tracks active watchLoop goroutines
 
 	watchPrefixes map[string]int
@@ -202,7 +206,9 @@ func (s *Store) SignalClose() {
 
 // Close closes the underlying Pebble database.
 func (s *Store) Close() error {
+	s.watchMu.Lock()
 	s.SignalClose()
+	s.watchMu.Unlock()
 	s.watcherWg.Wait()
 	return s.db.Close()
 }
@@ -536,6 +542,11 @@ func (s *Store) waitChan() <-chan struct{} {
 // store is closed.
 func (s *Store) WaitForRevision(ctx context.Context, rev int64) error {
 	for {
+		select {
+		case <-s.closed:
+			return ErrClosed
+		default:
+		}
 		// Snapshot the notify channel before re-checking currentRev. If a
 		// broadcast races between the load and the select, ch is already
 		// closed and the select returns immediately — no lost wakeup.
@@ -929,6 +940,14 @@ type Event struct {
 // whatever is immediately available into one WatchResponse, so a small buffer
 // still amortises gRPC Send overhead.
 func (s *Store) Watch(ctx context.Context, prefix string, startRev int64, withPrevKV bool) (<-chan Event, error) {
+	s.watchMu.Lock()
+	defer s.watchMu.Unlock()
+
+	select {
+	case <-s.closed:
+		return nil, ErrClosed
+	default:
+	}
 	ch := make(chan Event, 64)
 	unregister := s.registerWatch(prefix)
 	s.watcherWg.Add(1)
