@@ -176,6 +176,38 @@ func openCluster(t *testing.T, count int, store object.Store) []*t4.Node {
 	return nodes
 }
 
+func openElectionTestNode(t *testing.T, store object.Store, nodeID, dataDir string) *t4.Node {
+	t.Helper()
+	peerAddr := freeAddrImpl(t)
+	node, err := t4.Open(t4.Config{
+		DataDir:             dataDir,
+		ObjectStore:         store,
+		NodeID:              nodeID,
+		PeerListenAddr:      peerAddr,
+		AdvertisePeerAddr:   peerAddr,
+		FollowerMaxRetries:  2,
+		PeerBufferSize:      1000,
+		CheckpointInterval:  300 * time.Millisecond,
+		SegmentMaxAge:       200 * time.Millisecond,
+		LeaderWatchInterval: 200 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("open %s: %v", nodeID, err)
+	}
+	return node
+}
+
+func findFollower(t *testing.T, nodes []*t4.Node, leader *t4.Node) *t4.Node {
+	t.Helper()
+	for _, node := range nodes {
+		if node != leader {
+			return node
+		}
+	}
+	t.Fatal("no follower found")
+	return nil
+}
+
 func waitForFollowersRevision(t *testing.T, ctx context.Context, nodes []*t4.Node, leader *t4.Node, rev int64, timeout time.Duration, phase string) {
 	t.Helper()
 
@@ -190,6 +222,95 @@ func waitForFollowersRevision(t *testing.T, ctx context.Context, nodes []*t4.Nod
 			t.Fatalf("%s node-%d WaitForRevision(%d): %v (leader_rev=%d node_rev=%d)",
 				phase, i, rev, err, leader.CurrentRevision(), n.CurrentRevision())
 		}
+	}
+}
+
+// ── TestDuplicateNodeIDSupersedesOldNode ─────────────────────────────────────
+
+func TestDuplicateNodeIDSupersedesOldNode(t *testing.T) {
+	store := object.NewMem()
+	first := openElectionTestNode(t, store, "same-node", t.TempDir())
+	defer func() { _ = first.Close() }()
+	waitForLeaderNode(t, []*t4.Node{first}, 10*time.Second)
+
+	second := openElectionTestNode(t, store, "same-node", t.TempDir())
+	defer func() { _ = second.Close() }()
+	waitForLeaderNode(t, []*t4.Node{second}, 10*time.Second)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		_, err := first.LinearizableGet(ctx, "/duplicate-node/probe")
+		cancel()
+		if errors.Is(err, t4.ErrClosed) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("original node did not report ErrClosed after duplicate node-id superseded its lock")
+}
+
+// ── TestFollowerTakesOverWithoutUserWrites ───────────────────────────────────
+
+func TestFollowerTakesOverWithoutUserWrites(t *testing.T) {
+	store := object.NewMem()
+	nodes := []*t4.Node{
+		openElectionTestNode(t, store, "node-a", t.TempDir()),
+		openElectionTestNode(t, store, "node-b", t.TempDir()),
+	}
+	for _, node := range nodes {
+		defer func() { _ = node.Close() }()
+	}
+
+	leader := waitForLeaderNode(t, nodes, 10*time.Second)
+	follower := findFollower(t, nodes, leader)
+	_ = leader.Close()
+
+	if newLeader := waitForLeaderNode(t, []*t4.Node{follower}, 30*time.Second); newLeader != follower {
+		t.Fatalf("expected follower to take over, got %p", newLeader)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := follower.Put(ctx, "/failover/no-writes", []byte("ok"), 0); err != nil {
+		t.Fatalf("write after no-write takeover: %v", err)
+	}
+}
+
+// ── TestPreviousFollowerStartsAloneWithoutPreviousLeader ─────────────────────
+
+func TestPreviousFollowerStartsAloneWithoutPreviousLeader(t *testing.T) {
+	store := object.NewMem()
+	leaderDir := t.TempDir()
+	followerDir := t.TempDir()
+	nodes := []*t4.Node{
+		openElectionTestNode(t, store, "node-a", leaderDir),
+		openElectionTestNode(t, store, "node-b", followerDir),
+	}
+
+	leader := waitForLeaderNode(t, nodes, 10*time.Second)
+	follower := findFollower(t, nodes, leader)
+	followerID, restartDir := "node-a", leaderDir
+	if follower == nodes[1] {
+		followerID, restartDir = "node-b", followerDir
+	}
+	if err := follower.Close(); err != nil {
+		t.Fatalf("close follower: %v", err)
+	}
+	if err := leader.Close(); err != nil {
+		t.Fatalf("close leader: %v", err)
+	}
+
+	restarted := openElectionTestNode(t, store, followerID, restartDir)
+	defer func() { _ = restarted.Close() }()
+	if newLeader := waitForLeaderNode(t, []*t4.Node{restarted}, 30*time.Second); newLeader != restarted {
+		t.Fatalf("expected restarted former follower to take over, got %p", newLeader)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := restarted.Put(ctx, "/restart/former-follower", []byte("ok"), 0); err != nil {
+		t.Fatalf("write after former follower restart: %v", err)
 	}
 }
 
