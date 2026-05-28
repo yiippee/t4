@@ -55,13 +55,7 @@ func (n *Node) followLoop(bgCtx context.Context) {
 				// its Open() value and TakeOver backs off because it sees the
 				// current lock term as "already taken over at a higher term".
 				// The last entry in the batch has the highest-or-equal term.
-				if last := entries[len(entries)-1]; last.Term > n.term {
-					n.mu.Lock()
-					if last.Term > n.term {
-						n.term = last.Term
-					}
-					n.mu.Unlock()
-				}
+				n.observeTerm(entries[len(entries)-1].Term)
 				// Advance only after a successful apply so a reconnect retries
 				// from the start of the failed batch rather than skipping it.
 				fromRev = entries[len(entries)-1].Sequence() + 1
@@ -172,6 +166,7 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 			// Back off from election, but do not keep retrying a stale endpoint.
 			// If the lock advertises a leader address, switch followLoop to it.
 			if existing.LeaderAddr != "" {
+				n.observeTerm(existing.Term)
 				return peer.NewClient(existing.LeaderAddr, n.cfg.NodeID, n.cfg.FollowerMaxRetries, n.cfg.PeerClientTLS, n.log), false
 			}
 			return nil, false
@@ -209,13 +204,14 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 			n.log.Infof("t4: takebover: node is behind leader committed rev (ours=%d, leader=%d) — following current leader to catch up",
 				n.db.Load().CurrentRevision(), existing.CommittedRev)
 			if existing.LeaderAddr != "" {
+				n.observeTerm(existing.Term)
 				return peer.NewClient(existing.LeaderAddr, n.cfg.NodeID, n.cfg.FollowerMaxRetries, n.cfg.PeerClientTLS, n.log), false
 			}
 			return nil, false
 		}
 	}
 
-	rec, won, err := lock.TakeOver(ctx, n.term, n.db.Load().CurrentRevision())
+	rec, won, err := lock.TakeOver(ctx, n.currentTerm(), n.db.Load().CurrentRevision())
 	if err != nil {
 		n.log.Errorf("t4: takeover election error: %v", err)
 		return nil, false
@@ -263,6 +259,7 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 	}
 
 	if rec != nil && rec.LeaderAddr != "" {
+		n.observeTerm(rec.Term)
 		n.log.Infof("t4: lost election to %s (term=%d) — following", rec.NodeID, rec.Term)
 		return peer.NewClient(rec.LeaderAddr, n.cfg.NodeID, n.cfg.FollowerMaxRetries, n.cfg.PeerClientTLS, n.log), false
 	}

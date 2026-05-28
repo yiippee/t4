@@ -217,6 +217,20 @@ type Node struct {
 func (n *Node) loadRole() nodeRole   { return nodeRole(n.role.Load()) }
 func (n *Node) storeRole(r nodeRole) { n.role.Store(int32(r)) }
 
+func (n *Node) observeTerm(term uint64) {
+	n.mu.Lock()
+	if term > n.term {
+		n.term = term
+	}
+	n.mu.Unlock()
+}
+
+func (n *Node) currentTerm() uint64 {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.term
+}
+
 // Open creates and starts a Node.
 func Open(cfg Config) (*Node, error) {
 	cfg.setDefaults()
@@ -670,6 +684,7 @@ func (n *Node) electAndStart(bgCtx context.Context) error {
 		return n.becomeLeader(bgCtx, lock, rec)
 	}
 
+	n.observeTerm(rec.Term)
 	n.storeRole(roleFollower)
 	cli := peer.NewClient(rec.LeaderAddr, n.cfg.NodeID, n.cfg.FollowerMaxRetries, n.cfg.PeerClientTLS, n.log)
 	n.peerCli = cli
