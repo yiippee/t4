@@ -270,13 +270,16 @@ func (n *Node) attemptPromotion(bgCtx context.Context, lock *election.Lock, grac
 func (n *Node) forwardWrite(ctx context.Context, req *peer.ForwardRequest) (*peer.ForwardResponse, error) {
 	cli := n.leaderCli.Load()
 	if cli == nil {
-		return nil, ErrNotLeader
+		return nil, ErrNoLeader
 	}
 	op := fwdOpLabel(req.Op)
 	start := time.Now()
 	resp, err := cli.ForwardWrite(ctx, req)
 	metrics.ForwardedWritesTotal.WithLabelValues(op).Inc()
 	metrics.ForwardDuration.WithLabelValues(op).Observe(time.Since(start).Seconds())
+	if err != nil && isLeaderUnavailable(err) {
+		return nil, ErrNoLeader
+	}
 	return resp, err
 }
 
