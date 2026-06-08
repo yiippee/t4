@@ -9,7 +9,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/t4db/t4/internal/checkpoint"
-	"github.com/t4db/t4/pkg/object"
 )
 
 func restoreCmd() *cobra.Command {
@@ -23,14 +22,17 @@ func restoreCmd() *cobra.Command {
 }
 
 func restoreListCmd() *cobra.Command {
-	var s3 *s3Flags
+	var (
+		s3  *s3Flags
+		enc *objectStoreEncryptionFlags
+	)
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List checkpoints available in S3",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			store, err := object.NewS3StoreFromConfig(cmd.Context(), s3.config())
+			store, err := newObjectStoreForCommand(cmd.Context(), s3, enc)
 			if err != nil {
-				return fmt.Errorf("init S3: %w", err)
+				return err
 			}
 			ctx := cmd.Context()
 			cp := checkpoint.New(logrus.StandardLogger())
@@ -61,12 +63,14 @@ func restoreListCmd() *cobra.Command {
 		},
 	}
 	s3 = addS3Flags(cmd, true)
+	enc = addObjectStoreEncryptionFlags(cmd)
 	return cmd
 }
 
 func restoreCheckpointCmd() *cobra.Command {
 	var (
 		s3            *s3Flags
+		enc           *objectStoreEncryptionFlags
 		checkpointKey string
 		dataDir       string
 	)
@@ -93,9 +97,9 @@ replaying newer WAL from S3, omit --s3-bucket entirely.`,
 				return fmt.Errorf("data directory %q already contains a Pebble database; remove it first", pebbleDir)
 			}
 
-			store, err := object.NewS3StoreFromConfig(cmd.Context(), s3.config())
+			store, err := newObjectStoreForCommand(cmd.Context(), s3, enc)
 			if err != nil {
-				return fmt.Errorf("init S3: %w", err)
+				return err
 			}
 			ctx := cmd.Context()
 			cp := checkpoint.New(logrus.StandardLogger())
@@ -131,6 +135,7 @@ replaying newer WAL from S3, omit --s3-bucket entirely.`,
 		},
 	}
 	s3 = addS3Flags(cmd, true)
+	enc = addObjectStoreEncryptionFlags(cmd)
 	cmd.Flags().StringVar(&checkpointKey, "checkpoint", "", "checkpoint key to restore (default: latest; use 't4 restore list' to find keys)")
 	cmd.Flags().StringVar(&dataDir, "data-dir", "", "local directory to restore into (required; must not already contain a Pebble database) (env: T4_DATA_DIR)")
 	cmd.MarkFlagRequired("data-dir")

@@ -53,6 +53,33 @@ SST files are keyed by the first 16 hex characters of their SHA-256 content hash
 
 For exact JSON schemas and binary WAL frame layouts, see the [v1 Compatibility Contract](v1-compatibility.md).
 
+### Object-store encryption
+
+When `Config.ObjectStoreEncryption` or the CLI object-store encryption flags are set, T4 wraps every configured object
+store with `object.NewEncryptedStore`. Object keys remain plaintext so `List`, `DeleteMany`, checkpoint GC, branch
+registries, and leader election keep the same object layout. Object bodies are encrypted with AES-256-GCM before they
+reach the underlying store.
+
+The wrapper covers all S3-backed T4 data:
+
+- WAL segments under `wal/`
+- checkpoint indexes, manifests, and Pebble metadata under `checkpoint/` and `manifest/`
+- SST files under `sst/`
+- leader lock and branch registry entries
+
+Each encrypted object starts with a small T4 encryption header and then a sequence of authenticated frames. The logical
+object key, frame length, frame index, and final EOF frame are authenticated as AEAD associated data. Copying ciphertext
+to another object key, truncating a complete final frame, changing a length, or corrupting a byte causes decryption to
+fail.
+
+Encryption is intentionally located at the `object.Store` boundary. WAL, checkpoint, SST upload, restore, branch, GC,
+and status code continue to operate on plaintext readers and writers. This keeps the storage engine and recovery logic
+independent from the encryption implementation.
+
+Local file contents are not encrypted by this feature: Pebble files in `<data-dir>/db`, local WAL files in
+`<data-dir>/wal`, and temporary checkpoint directories remain plaintext unless the host filesystem or volume provides
+encryption.
+
 ---
 
 ## Write-ahead log (WAL)

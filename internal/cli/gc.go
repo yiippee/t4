@@ -8,12 +8,12 @@ import (
 
 	"github.com/t4db/t4/internal/checkpoint"
 	"github.com/t4db/t4/internal/wal"
-	"github.com/t4db/t4/pkg/object"
 )
 
 func gcCmd() *cobra.Command {
 	var (
 		s3   *s3Flags
+		enc  *objectStoreEncryptionFlags
 		keep int
 	)
 	cmd := &cobra.Command{
@@ -30,9 +30,9 @@ Three passes are performed in order:
 
 Run this periodically (e.g. once a day) to reclaim S3 storage.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			store, err := object.NewS3StoreFromConfig(cmd.Context(), s3.config())
+			store, err := newObjectStoreForCommand(cmd.Context(), s3, enc)
 			if err != nil {
-				return fmt.Errorf("init S3: %w", err)
+				return err
 			}
 			ctx := cmd.Context()
 
@@ -76,6 +76,7 @@ Run this periodically (e.g. once a day) to reclaim S3 storage.`,
 		},
 	}
 	s3 = addS3Flags(cmd, true)
+	enc = addObjectStoreEncryptionFlags(cmd)
 	cmd.Flags().IntVar(&keep, "keep", 3, "number of most-recent checkpoints to retain")
 	return cmd
 }

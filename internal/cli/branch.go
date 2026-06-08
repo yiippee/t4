@@ -8,7 +8,6 @@ import (
 
 	"github.com/t4db/t4"
 	"github.com/t4db/t4/internal/checkpoint"
-	"github.com/t4db/t4/pkg/object"
 )
 
 func branchCmd() *cobra.Command {
@@ -24,6 +23,7 @@ func branchCmd() *cobra.Command {
 func branchForkCmd() *cobra.Command {
 	var (
 		src           *s3Flags
+		enc           *objectStoreEncryptionFlags
 		branchID      string
 		checkpointKey string
 	)
@@ -35,9 +35,9 @@ func branchForkCmd() *cobra.Command {
 By default the branch is forked from the latest committed checkpoint revision.
 Use --checkpoint to fork from a specific older revision instead.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			sourceStore, err := object.NewS3StoreFromConfig(cmd.Context(), src.config())
+			sourceStore, err := newObjectStoreForCommand(cmd.Context(), src, enc)
 			if err != nil {
-				return fmt.Errorf("init source S3: %w", err)
+				return err
 			}
 			var cpKey string
 			if checkpointKey != "" {
@@ -58,6 +58,7 @@ Use --checkpoint to fork from a specific older revision instead.`,
 		},
 	}
 	src = addS3Flags(cmd, true)
+	enc = addObjectStoreEncryptionFlags(cmd)
 	cmd.Flags().StringVar(&branchID, "branch-id", "", "unique identifier for this branch (required) (env: T4_BRANCH_ID)")
 	cmd.Flags().StringVar(&checkpointKey, "checkpoint", "", "fork from this specific checkpoint key instead of the latest revision")
 	cmd.MarkFlagRequired("branch-id")
@@ -70,20 +71,22 @@ Use --checkpoint to fork from a specific older revision instead.`,
 func branchUnforkCmd() *cobra.Command {
 	var (
 		src      *s3Flags
+		enc      *objectStoreEncryptionFlags
 		branchID string
 	)
 	cmd := &cobra.Command{
 		Use:   "unfork",
 		Short: "Unregister a branch, allowing GC to reclaim its protected SSTs",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			sourceStore, err := object.NewS3StoreFromConfig(cmd.Context(), src.config())
+			sourceStore, err := newObjectStoreForCommand(cmd.Context(), src, enc)
 			if err != nil {
-				return fmt.Errorf("init source S3: %w", err)
+				return err
 			}
 			return t4.Unfork(cmd.Context(), sourceStore, branchID)
 		},
 	}
 	src = addS3Flags(cmd, true)
+	enc = addObjectStoreEncryptionFlags(cmd)
 	cmd.Flags().StringVar(&branchID, "branch-id", "", "unique identifier for this branch (required) (env: T4_BRANCH_ID)")
 	cmd.MarkFlagRequired("branch-id")
 	prependPreRunE(cmd, func(cmd *cobra.Command, _ []string) error {

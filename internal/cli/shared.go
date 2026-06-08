@@ -1,11 +1,16 @@
 package cli
 
 import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
 
+	"github.com/t4db/t4"
 	"github.com/t4db/t4/pkg/object"
 )
 
@@ -78,6 +83,112 @@ func addS3Flags(cmd *cobra.Command, bucketRequired bool) *s3Flags {
 		})
 	})
 	return f
+}
+
+type objectStoreEncryptionFlags struct {
+	KeyFile string
+	KeyEnv  string
+}
+
+func addObjectStoreEncryptionFlags(cmd *cobra.Command) *objectStoreEncryptionFlags {
+	f := &objectStoreEncryptionFlags{}
+	cmd.Flags().StringVar(&f.KeyFile, "object-store-encryption-key-file", "", "file containing a 32-byte AES-256 object-store encryption key as raw bytes, hex, or base64 (env: T4_OBJECT_STORE_ENCRYPTION_KEY_FILE)")
+	cmd.Flags().StringVar(&f.KeyEnv, "object-store-encryption-key-env", "", "environment variable holding a 32-byte AES-256 object-store encryption key as raw bytes, hex, or base64 (env: T4_OBJECT_STORE_ENCRYPTION_KEY_ENV)")
+	prependPreRunE(cmd, func(cmd *cobra.Command, _ []string) error {
+		return applyEnvVars(cmd, map[string]string{
+			"object-store-encryption-key-file": "T4_OBJECT_STORE_ENCRYPTION_KEY_FILE",
+			"object-store-encryption-key-env":  "T4_OBJECT_STORE_ENCRYPTION_KEY_ENV",
+		})
+	})
+	return f
+}
+
+func (f *objectStoreEncryptionFlags) enabled() bool {
+	return f != nil && (f.KeyFile != "" || f.KeyEnv != "")
+}
+
+func (f *objectStoreEncryptionFlags) config() (*t4.ObjectStoreEncryptionConfig, error) {
+	if !f.enabled() {
+		return nil, nil
+	}
+	kp, err := f.keyProvider()
+	if err != nil {
+		return nil, err
+	}
+	return &t4.ObjectStoreEncryptionConfig{KeyProvider: kp}, nil
+}
+
+func (f *objectStoreEncryptionFlags) wrapStore(store object.Store) (object.Store, error) {
+	if !f.enabled() || store == nil {
+		return store, nil
+	}
+	kp, err := f.keyProvider()
+	if err != nil {
+		return nil, err
+	}
+	return object.NewEncryptedStore(store, kp), nil
+}
+
+func newObjectStoreForCommand(ctx context.Context, s3 *s3Flags, enc *objectStoreEncryptionFlags) (object.Store, error) {
+	rawStore, err := object.NewS3StoreFromConfig(ctx, s3.config())
+	if err != nil {
+		return nil, fmt.Errorf("init S3: %w", err)
+	}
+	store, err := enc.wrapStore(rawStore)
+	if err != nil {
+		return nil, fmt.Errorf("encryption key: %w", err)
+	}
+	return store, nil
+}
+
+func (f *objectStoreEncryptionFlags) keyProvider() (*object.StaticKeyProvider, error) {
+	raw, err := f.keyMaterial()
+	if err != nil {
+		return nil, err
+	}
+	decoded, err := decodeKeyMaterial(raw)
+	if err != nil {
+		return nil, err
+	}
+	return object.NewStaticKeyProvider(decoded)
+}
+
+func (f *objectStoreEncryptionFlags) keyMaterial() ([]byte, error) {
+	if f.KeyFile != "" {
+		data, err := os.ReadFile(f.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("read object-store encryption key file: %w", err)
+		}
+		return data, nil
+	}
+	val := os.Getenv(f.KeyEnv)
+	if val == "" {
+		return nil, fmt.Errorf("environment variable %q is empty or not set", f.KeyEnv)
+	}
+	return []byte(val), nil
+}
+
+func decodeKeyMaterial(raw []byte) ([]byte, error) {
+	if len(raw) == 32 {
+		return append([]byte(nil), raw...), nil
+	}
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 32 {
+		return append([]byte(nil), raw...), nil
+	}
+	if len(raw) == 64 {
+		dst := make([]byte, 32)
+		if _, err := hex.Decode(dst, raw); err == nil {
+			return dst, nil
+		}
+	}
+	if dst, err := base64.StdEncoding.DecodeString(string(raw)); err == nil && len(dst) == 32 {
+		return dst, nil
+	}
+	if dst, err := base64.RawStdEncoding.DecodeString(string(raw)); err == nil && len(dst) == 32 {
+		return dst, nil
+	}
+	return nil, fmt.Errorf("object-store encryption key must be 32 raw bytes, 64 hex chars, or base64 for 32 bytes; got %d bytes", len(raw))
 }
 
 // prependPreRunE prepends fn to cmd's existing PreRunE hook, if any.
