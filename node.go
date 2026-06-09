@@ -234,6 +234,36 @@ func (n *Node) currentTerm() uint64 {
 	return n.term
 }
 
+func applyObjectStoreEncryption(cfg *Config) error {
+	if cfg.ObjectStoreEncryption == nil {
+		return nil
+	}
+	if cfg.ObjectStoreEncryption.KeyProvider == nil {
+		return fmt.Errorf("t4: object store encryption key provider is nil")
+	}
+	kp := cfg.ObjectStoreEncryption.KeyProvider
+	wrap := func(s object.Store) object.Store {
+		if s == nil {
+			return nil
+		}
+		return object.NewEncryptedStore(s, kp)
+	}
+	cfg.ObjectStore = wrap(cfg.ObjectStore)
+	cfg.AncestorStore = wrap(cfg.AncestorStore)
+	if cfg.BranchPoint != nil {
+		cfg.BranchPoint.SourceStore = wrap(cfg.BranchPoint.SourceStore)
+	}
+	if cfg.RestorePoint != nil && cfg.RestorePoint.Store != nil {
+		wrapped := object.NewEncryptedStore(cfg.RestorePoint.Store, kp)
+		vs, ok := wrapped.(object.VersionedStore)
+		if !ok {
+			return fmt.Errorf("t4: encrypted object-store restore source does not support versioned reads")
+		}
+		cfg.RestorePoint.Store = vs
+	}
+	return nil
+}
+
 // Open creates and starts a Node.
 func Open(cfg Config) (*Node, error) {
 	cfg.setDefaults()
@@ -244,6 +274,10 @@ func Open(cfg Config) (*Node, error) {
 	// Register all t4 metrics on the configured registerer.
 	// When nil, metrics.Register falls back to prometheus.DefaultRegisterer.
 	metrics.Register(cfg.MetricsRegisterer)
+
+	if err := applyObjectStoreEncryption(&cfg); err != nil {
+		return nil, err
+	}
 
 	// Wrap the object store with Prometheus instrumentation so every S3
 	// operation is counted and timed without scattering metrics calls

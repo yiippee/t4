@@ -137,6 +137,26 @@ GetVersioned(ctx context.Context, key, versionID string) (io.ReadCloser, error)
 }
 ```
 
+## Encrypted Object Format
+
+When object-store encryption is enabled, object keys keep the same layout but each object body is replaced with an
+encrypted stream:
+
+```text
+[4 bytes magic "T4E1"][1 byte key id][12 bytes object nonce]
+repeated encrypted frames:
+  [4 bytes plaintext length][ciphertext || 16 byte GCM tag]
+final encrypted frame:
+  [4 bytes zero length][16 byte GCM tag]
+```
+
+The encryption algorithm is AES-256-GCM. The logical object key, header, frame index, frame length, and final-frame bit
+are AEAD associated data. A reader must reject ciphertext copied to a different key, changed frame lengths, missing final
+frames, and authentication failures.
+
+The key id byte is reserved for future key rotation. Current implementations write `0` and use the single configured
+key provider for all reads and writes.
+
 ## Manifest Schema
 
 `manifest/latest` is JSON:

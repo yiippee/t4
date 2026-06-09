@@ -19,17 +19,44 @@ type instrumentedConditionalStore struct {
 	inner ConditionalStore
 }
 
+type instrumentedVersionedStore struct {
+	instrumentedStore
+	inner VersionedStore
+}
+
+type instrumentedConditionalVersionedStore struct {
+	instrumentedStore
+	conditional ConditionalStore
+	versioned   VersionedStore
+}
+
 // NewInstrumentedStore wraps s with metrics instrumentation. If s also
-// implements ConditionalStore the returned value implements it too, so
-// callers that type-assert to ConditionalStore continue to work.
+// implements optional Store extensions, the returned value implements them too,
+// so callers that type-assert to ConditionalStore or VersionedStore continue to
+// work.
 func NewInstrumentedStore(s Store) Store {
-	if cs, ok := s.(ConditionalStore); ok {
+	cs, hasConditional := s.(ConditionalStore)
+	vs, hasVersioned := s.(VersionedStore)
+	switch {
+	case hasConditional && hasVersioned:
+		return &instrumentedConditionalVersionedStore{
+			instrumentedStore: instrumentedStore{inner: s},
+			conditional:       cs,
+			versioned:         vs,
+		}
+	case hasConditional:
 		return &instrumentedConditionalStore{
 			instrumentedStore: instrumentedStore{inner: s},
 			inner:             cs,
 		}
+	case hasVersioned:
+		return &instrumentedVersionedStore{
+			instrumentedStore: instrumentedStore{inner: s},
+			inner:             vs,
+		}
+	default:
+		return &instrumentedStore{inner: s}
 	}
-	return &instrumentedStore{inner: s}
 }
 
 func record(op string, start time.Time, err error) {
@@ -95,4 +122,39 @@ func (s *instrumentedConditionalStore) PutIfMatch(ctx context.Context, key strin
 	err := s.inner.PutIfMatch(ctx, key, r, matchETag)
 	record("put_if_match", start, err)
 	return err
+}
+
+func (s *instrumentedVersionedStore) GetVersioned(ctx context.Context, key, versionID string) (io.ReadCloser, error) {
+	start := time.Now()
+	rc, err := s.inner.GetVersioned(ctx, key, versionID)
+	record("get_versioned", start, err)
+	return rc, err
+}
+
+func (s *instrumentedConditionalVersionedStore) GetETag(ctx context.Context, key string) (*GetWithETag, error) {
+	start := time.Now()
+	res, err := s.conditional.GetETag(ctx, key)
+	record("get_etag", start, err)
+	return res, err
+}
+
+func (s *instrumentedConditionalVersionedStore) PutIfAbsent(ctx context.Context, key string, r io.Reader) error {
+	start := time.Now()
+	err := s.conditional.PutIfAbsent(ctx, key, r)
+	record("put_if_absent", start, err)
+	return err
+}
+
+func (s *instrumentedConditionalVersionedStore) PutIfMatch(ctx context.Context, key string, r io.Reader, matchETag string) error {
+	start := time.Now()
+	err := s.conditional.PutIfMatch(ctx, key, r, matchETag)
+	record("put_if_match", start, err)
+	return err
+}
+
+func (s *instrumentedConditionalVersionedStore) GetVersioned(ctx context.Context, key, versionID string) (io.ReadCloser, error) {
+	start := time.Now()
+	rc, err := s.versioned.GetVersioned(ctx, key, versionID)
+	record("get_versioned", start, err)
+	return rc, err
 }

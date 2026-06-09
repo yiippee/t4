@@ -34,6 +34,7 @@ description: All t4.Config fields and CLI flags for the T4 standalone binary.
 | `WAL`                 | `WALWriter`                        | `nil`            | Expert hook for replacing the filesystem WAL. Intended for constrained runtimes and tests. Production deployments normally leave this nil.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `Logger`              | `Logger`                           | logrus standard logger | Receives all T4 log output. Set this in embedded mode to control destination, level, and format. Use `t4.NoopLogger` to silence T4 logs.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `MetricsRegisterer`   | `prometheus.Registerer`            | `prometheus.DefaultRegisterer` | Prometheus registerer used for T4 metrics. Pass a custom registry to isolate T4 metrics when embedding.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `ObjectStoreEncryption` | `*ObjectStoreEncryptionConfig`   | `nil`            | Enables AES-256-GCM encryption for object-store data at rest. Local Pebble files and local WAL files remain plaintext.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 ### Using a custom S3-compatible store
 
@@ -67,6 +68,44 @@ type WALWriter interface {
 Custom WAL implementations must preserve the same durability ordering as the default filesystem WAL.
 
 `pkg/object` provides `NewS3Store` (AWS SDK v2) and `NewMem` (in-memory, for tests).
+
+### Object-store encryption
+
+Set `Config.ObjectStoreEncryption` to encrypt every object-store body written by T4:
+
+```go
+keyProvider, err := object.NewStaticKeyProvider(keyBytes) // exactly 32 bytes
+node, err := t4.Open(t4.Config{
+    DataDir: "/var/lib/t4",
+    ObjectStore: s3Store,
+    ObjectStoreEncryption: &t4.ObjectStoreEncryptionConfig{
+        KeyProvider: keyProvider,
+    },
+})
+```
+
+The same key must be supplied to every node that shares an S3 prefix. The same key is also required for `RestorePoint`,
+branch source stores, and maintenance commands that read encrypted objects.
+
+The standalone CLI supports two key sources:
+
+- `--object-store-encryption-key-file`: file containing a 32-byte key as raw bytes, 64 hex characters, or base64.
+- `--object-store-encryption-key-env`: name of an environment variable whose value is a 32-byte key as raw bytes, 64 hex characters, or base64.
+
+The flags are available on `t4 run`, `t4 restore`, `t4 branch`, `t4 gc`, and `t4 status`. Environment variables
+`T4_OBJECT_STORE_ENCRYPTION_KEY_FILE` and `T4_OBJECT_STORE_ENCRYPTION_KEY_ENV` can set those flag values.
+
+Example:
+
+```bash
+openssl rand -base64 32 > /etc/t4/object-key.b64
+
+t4 run \
+  --data-dir /var/lib/t4 \
+  --s3-bucket my-bucket \
+  --s3-prefix t4/ \
+  --object-store-encryption-key-file /etc/t4/object-key.b64
+```
 
 Optionally implement `ConditionalStore` for atomic election writes:
 
@@ -127,6 +166,8 @@ metadata.
 | Command | Environment variable | Equivalent flag |
 |---------|----------------------|-----------------|
 | `t4 branch fork` | `T4_BRANCH_ID` | `--branch-id` |
+| `t4 branch fork` | `T4_OBJECT_STORE_ENCRYPTION_KEY_ENV` | `--object-store-encryption-key-env` |
+| `t4 branch fork` | `T4_OBJECT_STORE_ENCRYPTION_KEY_FILE` | `--object-store-encryption-key-file` |
 | `t4 branch fork` | `T4_S3_ACCESS_KEY_ID` | `--s3-access-key-id` |
 | `t4 branch fork` | `T4_S3_BUCKET` | `--s3-bucket` |
 | `t4 branch fork` | `T4_S3_CA_BUNDLE` | `--s3-ca-bundle` |
@@ -137,6 +178,8 @@ metadata.
 | `t4 branch fork` | `T4_S3_SECRET_ACCESS_KEY` | `--s3-secret-access-key` |
 | `t4 branch fork` | `T4_S3_SESSION_TOKEN` | `--s3-session-token` |
 | `t4 branch unfork` | `T4_BRANCH_ID` | `--branch-id` |
+| `t4 branch unfork` | `T4_OBJECT_STORE_ENCRYPTION_KEY_ENV` | `--object-store-encryption-key-env` |
+| `t4 branch unfork` | `T4_OBJECT_STORE_ENCRYPTION_KEY_FILE` | `--object-store-encryption-key-file` |
 | `t4 branch unfork` | `T4_S3_ACCESS_KEY_ID` | `--s3-access-key-id` |
 | `t4 branch unfork` | `T4_S3_BUCKET` | `--s3-bucket` |
 | `t4 branch unfork` | `T4_S3_CA_BUNDLE` | `--s3-ca-bundle` |
@@ -146,6 +189,8 @@ metadata.
 | `t4 branch unfork` | `T4_S3_REGION` | `--s3-region` |
 | `t4 branch unfork` | `T4_S3_SECRET_ACCESS_KEY` | `--s3-secret-access-key` |
 | `t4 branch unfork` | `T4_S3_SESSION_TOKEN` | `--s3-session-token` |
+| `t4 gc` | `T4_OBJECT_STORE_ENCRYPTION_KEY_ENV` | `--object-store-encryption-key-env` |
+| `t4 gc` | `T4_OBJECT_STORE_ENCRYPTION_KEY_FILE` | `--object-store-encryption-key-file` |
 | `t4 gc` | `T4_S3_ACCESS_KEY_ID` | `--s3-access-key-id` |
 | `t4 gc` | `T4_S3_BUCKET` | `--s3-bucket` |
 | `t4 gc` | `T4_S3_CA_BUNDLE` | `--s3-ca-bundle` |
@@ -162,6 +207,8 @@ metadata.
 | `t4 inspect list` | `T4_DATA_DIR` | `--data-dir` |
 | `t4 inspect meta` | `T4_DATA_DIR` | `--data-dir` |
 | `t4 restore checkpoint` | `T4_DATA_DIR` | `--data-dir` |
+| `t4 restore checkpoint` | `T4_OBJECT_STORE_ENCRYPTION_KEY_ENV` | `--object-store-encryption-key-env` |
+| `t4 restore checkpoint` | `T4_OBJECT_STORE_ENCRYPTION_KEY_FILE` | `--object-store-encryption-key-file` |
 | `t4 restore checkpoint` | `T4_S3_ACCESS_KEY_ID` | `--s3-access-key-id` |
 | `t4 restore checkpoint` | `T4_S3_BUCKET` | `--s3-bucket` |
 | `t4 restore checkpoint` | `T4_S3_CA_BUNDLE` | `--s3-ca-bundle` |
@@ -171,6 +218,8 @@ metadata.
 | `t4 restore checkpoint` | `T4_S3_REGION` | `--s3-region` |
 | `t4 restore checkpoint` | `T4_S3_SECRET_ACCESS_KEY` | `--s3-secret-access-key` |
 | `t4 restore checkpoint` | `T4_S3_SESSION_TOKEN` | `--s3-session-token` |
+| `t4 restore list` | `T4_OBJECT_STORE_ENCRYPTION_KEY_ENV` | `--object-store-encryption-key-env` |
+| `t4 restore list` | `T4_OBJECT_STORE_ENCRYPTION_KEY_FILE` | `--object-store-encryption-key-file` |
 | `t4 restore list` | `T4_S3_ACCESS_KEY_ID` | `--s3-access-key-id` |
 | `t4 restore list` | `T4_S3_BUCKET` | `--s3-bucket` |
 | `t4 restore list` | `T4_S3_CA_BUNDLE` | `--s3-ca-bundle` |
@@ -201,6 +250,8 @@ metadata.
 | `t4 run` | `T4_LOG_LEVEL` | `--log-level` |
 | `t4 run` | `T4_METRICS_ADDR` | `--metrics-addr` |
 | `t4 run` | `T4_NODE_ID` | `--node-id` |
+| `t4 run` | `T4_OBJECT_STORE_ENCRYPTION_KEY_ENV` | `--object-store-encryption-key-env` |
+| `t4 run` | `T4_OBJECT_STORE_ENCRYPTION_KEY_FILE` | `--object-store-encryption-key-file` |
 | `t4 run` | `T4_PEER_LISTEN` | `--peer-listen` |
 | `t4 run` | `T4_PEER_TLS_CA` | `--peer-tls-ca` |
 | `t4 run` | `T4_PEER_TLS_CERT` | `--peer-tls-cert` |
@@ -220,6 +271,8 @@ metadata.
 | `t4 run` | `T4_TOKEN_TTL` | `--token-ttl` |
 | `t4 run` | `T4_WAL_SYNC_UPLOAD` | `--wal-sync-upload` |
 | `t4 run` | `T4_WATCH_SEND_TIMEOUT` | `--watch-send-timeout` |
+| `t4 status` | `T4_OBJECT_STORE_ENCRYPTION_KEY_ENV` | `--object-store-encryption-key-env` |
+| `t4 status` | `T4_OBJECT_STORE_ENCRYPTION_KEY_FILE` | `--object-store-encryption-key-file` |
 | `t4 status` | `T4_S3_ACCESS_KEY_ID` | `--s3-access-key-id` |
 | `t4 status` | `T4_S3_BUCKET` | `--s3-bucket` |
 | `t4 status` | `T4_S3_CA_BUNDLE` | `--s3-ca-bundle` |
@@ -240,6 +293,8 @@ Generated from the CLI flag definitions in Go. Run `go run ./hack/docgen` after 
 |---------|------|---------|-----|----------|------|
 | `t4 branch fork` | `--branch-id` | — | `T4_BRANCH_ID` | Yes | unique identifier for this branch (required) |
 | `t4 branch fork` | `--checkpoint` | — | — | No | fork from this specific checkpoint key instead of the latest revision |
+| `t4 branch fork` | `--object-store-encryption-key-env` | — | `T4_OBJECT_STORE_ENCRYPTION_KEY_ENV` | No | environment variable holding a 32-byte AES-256 object-store encryption key as raw bytes, hex, or base64 |
+| `t4 branch fork` | `--object-store-encryption-key-file` | — | `T4_OBJECT_STORE_ENCRYPTION_KEY_FILE` | No | file containing a 32-byte AES-256 object-store encryption key as raw bytes, hex, or base64 |
 | `t4 branch fork` | `--s3-access-key-id` | — | `T4_S3_ACCESS_KEY_ID` | No | t4 S3 access key ID; when set with --s3-secret-access-key, uses static credentials |
 | `t4 branch fork` | `--s3-bucket` | — | `T4_S3_BUCKET` | Yes | S3 bucket |
 | `t4 branch fork` | `--s3-ca-bundle` | — | `T4_S3_CA_BUNDLE` | No | PEM CA bundle file to trust for HTTPS to the S3 endpoint; use this for MinIO and other S3-compatible stores running behind a self-signed CA |
@@ -250,6 +305,8 @@ Generated from the CLI flag definitions in Go. Run `go run ./hack/docgen` after 
 | `t4 branch fork` | `--s3-secret-access-key` | — | `T4_S3_SECRET_ACCESS_KEY` | No | AWS secret access key |
 | `t4 branch fork` | `--s3-session-token` | — | `T4_S3_SESSION_TOKEN` | No | session token for temporary STS credentials; honored with --s3-access-key-id/--s3-secret-access-key |
 | `t4 branch unfork` | `--branch-id` | — | `T4_BRANCH_ID` | Yes | unique identifier for this branch (required) |
+| `t4 branch unfork` | `--object-store-encryption-key-env` | — | `T4_OBJECT_STORE_ENCRYPTION_KEY_ENV` | No | environment variable holding a 32-byte AES-256 object-store encryption key as raw bytes, hex, or base64 |
+| `t4 branch unfork` | `--object-store-encryption-key-file` | — | `T4_OBJECT_STORE_ENCRYPTION_KEY_FILE` | No | file containing a 32-byte AES-256 object-store encryption key as raw bytes, hex, or base64 |
 | `t4 branch unfork` | `--s3-access-key-id` | — | `T4_S3_ACCESS_KEY_ID` | No | t4 S3 access key ID; when set with --s3-secret-access-key, uses static credentials |
 | `t4 branch unfork` | `--s3-bucket` | — | `T4_S3_BUCKET` | Yes | S3 bucket |
 | `t4 branch unfork` | `--s3-ca-bundle` | — | `T4_S3_CA_BUNDLE` | No | PEM CA bundle file to trust for HTTPS to the S3 endpoint; use this for MinIO and other S3-compatible stores running behind a self-signed CA |
@@ -260,6 +317,8 @@ Generated from the CLI flag definitions in Go. Run `go run ./hack/docgen` after 
 | `t4 branch unfork` | `--s3-secret-access-key` | — | `T4_S3_SECRET_ACCESS_KEY` | No | AWS secret access key |
 | `t4 branch unfork` | `--s3-session-token` | — | `T4_S3_SESSION_TOKEN` | No | session token for temporary STS credentials; honored with --s3-access-key-id/--s3-secret-access-key |
 | `t4 gc` | `--keep` | `3` | — | No | number of most-recent checkpoints to retain |
+| `t4 gc` | `--object-store-encryption-key-env` | — | `T4_OBJECT_STORE_ENCRYPTION_KEY_ENV` | No | environment variable holding a 32-byte AES-256 object-store encryption key as raw bytes, hex, or base64 |
+| `t4 gc` | `--object-store-encryption-key-file` | — | `T4_OBJECT_STORE_ENCRYPTION_KEY_FILE` | No | file containing a 32-byte AES-256 object-store encryption key as raw bytes, hex, or base64 |
 | `t4 gc` | `--s3-access-key-id` | — | `T4_S3_ACCESS_KEY_ID` | No | t4 S3 access key ID; when set with --s3-secret-access-key, uses static credentials |
 | `t4 gc` | `--s3-bucket` | — | `T4_S3_BUCKET` | Yes | S3 bucket |
 | `t4 gc` | `--s3-ca-bundle` | — | `T4_S3_CA_BUNDLE` | No | PEM CA bundle file to trust for HTTPS to the S3 endpoint; use this for MinIO and other S3-compatible stores running behind a self-signed CA |
@@ -290,6 +349,8 @@ Generated from the CLI flag definitions in Go. Run `go run ./hack/docgen` after 
 | `t4 inspect meta` | `--json` | `false` | — | No | emit JSON output |
 | `t4 restore checkpoint` | `--checkpoint` | — | — | No | checkpoint key to restore (default: latest; use 't4 restore list' to find keys) |
 | `t4 restore checkpoint` | `--data-dir` | — | `T4_DATA_DIR` | Yes | local directory to restore into (required; must not already contain a Pebble database) |
+| `t4 restore checkpoint` | `--object-store-encryption-key-env` | — | `T4_OBJECT_STORE_ENCRYPTION_KEY_ENV` | No | environment variable holding a 32-byte AES-256 object-store encryption key as raw bytes, hex, or base64 |
+| `t4 restore checkpoint` | `--object-store-encryption-key-file` | — | `T4_OBJECT_STORE_ENCRYPTION_KEY_FILE` | No | file containing a 32-byte AES-256 object-store encryption key as raw bytes, hex, or base64 |
 | `t4 restore checkpoint` | `--s3-access-key-id` | — | `T4_S3_ACCESS_KEY_ID` | No | t4 S3 access key ID; when set with --s3-secret-access-key, uses static credentials |
 | `t4 restore checkpoint` | `--s3-bucket` | — | `T4_S3_BUCKET` | Yes | S3 bucket |
 | `t4 restore checkpoint` | `--s3-ca-bundle` | — | `T4_S3_CA_BUNDLE` | No | PEM CA bundle file to trust for HTTPS to the S3 endpoint; use this for MinIO and other S3-compatible stores running behind a self-signed CA |
@@ -299,6 +360,8 @@ Generated from the CLI flag definitions in Go. Run `go run ./hack/docgen` after 
 | `t4 restore checkpoint` | `--s3-region` | — | `T4_S3_REGION` | No | AWS region |
 | `t4 restore checkpoint` | `--s3-secret-access-key` | — | `T4_S3_SECRET_ACCESS_KEY` | No | AWS secret access key |
 | `t4 restore checkpoint` | `--s3-session-token` | — | `T4_S3_SESSION_TOKEN` | No | session token for temporary STS credentials; honored with --s3-access-key-id/--s3-secret-access-key |
+| `t4 restore list` | `--object-store-encryption-key-env` | — | `T4_OBJECT_STORE_ENCRYPTION_KEY_ENV` | No | environment variable holding a 32-byte AES-256 object-store encryption key as raw bytes, hex, or base64 |
+| `t4 restore list` | `--object-store-encryption-key-file` | — | `T4_OBJECT_STORE_ENCRYPTION_KEY_FILE` | No | file containing a 32-byte AES-256 object-store encryption key as raw bytes, hex, or base64 |
 | `t4 restore list` | `--s3-access-key-id` | — | `T4_S3_ACCESS_KEY_ID` | No | t4 S3 access key ID; when set with --s3-secret-access-key, uses static credentials |
 | `t4 restore list` | `--s3-bucket` | — | `T4_S3_BUCKET` | Yes | S3 bucket |
 | `t4 restore list` | `--s3-ca-bundle` | — | `T4_S3_CA_BUNDLE` | No | PEM CA bundle file to trust for HTTPS to the S3 endpoint; use this for MinIO and other S3-compatible stores running behind a self-signed CA |
@@ -329,6 +392,8 @@ Generated from the CLI flag definitions in Go. Run `go run ./hack/docgen` after 
 | `t4 run` | `--log-level` | `info` | `T4_LOG_LEVEL` | No | log level (trace/debug/info/warn/error) |
 | `t4 run` | `--metrics-addr` | `0.0.0.0:9090` | `T4_METRICS_ADDR` | No | HTTP address for /metrics, /healthz, /readyz (e.g. 0.0.0.0:9090) |
 | `t4 run` | `--node-id` | — | `T4_NODE_ID` | No | stable unique node identifier (default: hostname) |
+| `t4 run` | `--object-store-encryption-key-env` | — | `T4_OBJECT_STORE_ENCRYPTION_KEY_ENV` | No | environment variable holding a 32-byte AES-256 object-store encryption key as raw bytes, hex, or base64 |
+| `t4 run` | `--object-store-encryption-key-file` | — | `T4_OBJECT_STORE_ENCRYPTION_KEY_FILE` | No | file containing a 32-byte AES-256 object-store encryption key as raw bytes, hex, or base64 |
 | `t4 run` | `--peer-listen` | — | `T4_PEER_LISTEN` | No | address for leader→follower WAL stream (e.g. 0.0.0.0:3380); enables multi-node mode |
 | `t4 run` | `--peer-tls-ca` | — | `T4_PEER_TLS_CA` | No | CA certificate file for peer mTLS (PEM) |
 | `t4 run` | `--peer-tls-cert` | — | `T4_PEER_TLS_CERT` | No | node certificate file for peer mTLS (PEM) |
@@ -348,6 +413,8 @@ Generated from the CLI flag definitions in Go. Run `go run ./hack/docgen` after 
 | `t4 run` | `--token-ttl` | `300` | `T4_TOKEN_TTL` | No | bearer token TTL in seconds |
 | `t4 run` | `--wal-sync-upload` | — | `T4_WAL_SYNC_UPLOAD` | No | upload WAL segments synchronously before ack (true/false; default true for safety, set false when local storage is durable) |
 | `t4 run` | `--watch-send-timeout` | `30s` | `T4_WATCH_SEND_TIMEOUT` | No | cancel a watch whose server-side send queue blocks for longer than this; clients receive a 'mvcc: watcher is slow' cancellation when possible |
+| `t4 status` | `--object-store-encryption-key-env` | — | `T4_OBJECT_STORE_ENCRYPTION_KEY_ENV` | No | environment variable holding a 32-byte AES-256 object-store encryption key as raw bytes, hex, or base64 |
+| `t4 status` | `--object-store-encryption-key-file` | — | `T4_OBJECT_STORE_ENCRYPTION_KEY_FILE` | No | file containing a 32-byte AES-256 object-store encryption key as raw bytes, hex, or base64 |
 | `t4 status` | `--s3-access-key-id` | — | `T4_S3_ACCESS_KEY_ID` | No | t4 S3 access key ID; when set with --s3-secret-access-key, uses static credentials |
 | `t4 status` | `--s3-bucket` | — | `T4_S3_BUCKET` | Yes | S3 bucket |
 | `t4 status` | `--s3-ca-bundle` | — | `T4_S3_CA_BUNDLE` | No | PEM CA bundle file to trust for HTTPS to the S3 endpoint; use this for MinIO and other S3-compatible stores running behind a self-signed CA |

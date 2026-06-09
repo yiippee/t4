@@ -227,6 +227,18 @@ type Config struct {
 	// prometheus.Gatherer; otherwise /metrics falls back to
 	// prometheus.DefaultGatherer.
 	MetricsRegisterer prometheus.Registerer
+
+	// ObjectStoreEncryption, when non-nil, encrypts all object-store data at
+	// rest using AES-256-GCM. Local Pebble files and local WAL files remain
+	// plaintext.
+	ObjectStoreEncryption *ObjectStoreEncryptionConfig
+}
+
+// ObjectStoreEncryptionConfig holds object-store encryption settings.
+type ObjectStoreEncryptionConfig struct {
+	// KeyProvider supplies the AES-256 key used to encrypt and decrypt object
+	// bodies. It must be non-nil when ObjectStoreEncryption is set.
+	KeyProvider object.KeyProvider
 }
 
 func (c *Config) setDefaults() {

@@ -7,11 +7,13 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/t4db/t4/internal/checkpoint"
-	"github.com/t4db/t4/pkg/object"
 )
 
 func statusCmd() *cobra.Command {
-	var s3 *s3Flags
+	var (
+		s3  *s3Flags
+		enc *objectStoreEncryptionFlags
+	)
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show the S3 storage status of a t4 node",
@@ -20,9 +22,9 @@ total checkpoint and WAL segment counts, and any registered branch forks.
 
 This command does not require a running node — it reads directly from S3.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			store, err := object.NewS3StoreFromConfig(cmd.Context(), s3.config())
+			store, err := newObjectStoreForCommand(cmd.Context(), s3, enc)
 			if err != nil {
-				return fmt.Errorf("init S3: %w", err)
+				return err
 			}
 			ctx := cmd.Context()
 
@@ -76,5 +78,6 @@ This command does not require a running node — it reads directly from S3.`,
 		},
 	}
 	s3 = addS3Flags(cmd, true)
+	enc = addObjectStoreEncryptionFlags(cmd)
 	return cmd
 }

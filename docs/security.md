@@ -14,6 +14,9 @@ T4 has three independently configurable TLS surfaces:
 
 All three use standard PEM-encoded certificates. You can enable any subset independently.
 
+Object-store encryption at rest is separate from TLS. TLS protects traffic in transit to S3; T4 object-store encryption
+protects object bodies after they are written to S3.
+
 ## v1 TLS contract
 
 The following TLS guarantees are part of the v1 release contract and will not change without a major version bump:
@@ -24,6 +27,55 @@ The following TLS guarantees are part of the v1 release contract and will not ch
 - **S3 CA trust**: pin a CA bundle explicitly with `--s3-ca-bundle` (or `T4_S3_CA_BUNDLE`). System trust stores are not consulted when this flag is set — the bundle is the single source of truth. Required for MinIO and other private-CA S3-compatible stores; relying on `SSL_CERT_FILE` is unsupported because Go on macOS does not honor it.
 - **Peer mTLS**: both `--peer-tls-cert` and `--peer-tls-ca` must be supplied on every node; peer connections always verify the certificate. Plaintext peer mode and TLS-without-client-cert peer mode are not supported.
 - **Client TLS**: omitting `--client-tls-ca` enables server-only TLS (encryption with no client-cert verification). Supplying it enables full mTLS — clients without a CA-signed cert are refused.
+
+---
+
+## Object-store encryption at rest
+
+T4 can encrypt object-store data client-side before writing it to S3-compatible storage:
+
+```bash
+t4 run \
+  --data-dir /var/lib/t4 \
+  --s3-bucket my-bucket \
+  --s3-prefix t4/ \
+  --object-store-encryption-key-file /etc/t4/object-key.b64
+```
+
+The key must be exactly 32 bytes after decoding. `--object-store-encryption-key-file` accepts raw bytes, 64 hex
+characters, or base64. `--object-store-encryption-key-env` accepts the name of an environment variable whose value is
+raw bytes, 64 hex characters, or base64 key material.
+
+The same key is required for every node and every maintenance command that reads the encrypted prefix:
+
+```bash
+t4 status --s3-bucket my-bucket --s3-prefix t4/ \
+  --object-store-encryption-key-file /etc/t4/object-key.b64
+
+t4 gc --s3-bucket my-bucket --s3-prefix t4/ \
+  --object-store-encryption-key-file /etc/t4/object-key.b64
+```
+
+What is encrypted:
+
+- WAL segment object bodies
+- checkpoint manifests, indexes, Pebble metadata, and SST object bodies
+- leader-lock and branch registry object bodies
+
+What remains visible:
+
+- S3 bucket name, prefix, object keys, object sizes, timestamps, and access patterns
+- local Pebble, local WAL, and temporary checkpoint file contents
+- process environment and command-line metadata on the host
+
+Operational constraints:
+
+- Do not mix encrypted and plaintext objects under one prefix.
+- All nodes sharing a prefix must use the same key.
+- Branch source and branch target must use the same key while inherited SSTs are shared.
+- Key rotation is not implemented yet; rotate by restoring or copying into a new encrypted prefix with a new key.
+- Keep S3 HTTPS and bucket-side SSE/KMS enabled if required by policy. They protect different layers and can be used
+  together.
 
 ---
 
@@ -348,4 +400,5 @@ For leader election, T4 uses conditional PUTs (`If-None-Match`, `If-Match`). The
 - Use IRSA / Workload Identity — no static credentials in environment variables or Secrets
 - Enable S3 bucket versioning if you use point-in-time restore
 - Enable S3 server-side encryption (SSE-S3 or SSE-KMS)
+- Enable T4 object-store encryption when the storage backend or operators should not see plaintext object bodies
 - Restrict bucket access with a bucket policy that denies public access

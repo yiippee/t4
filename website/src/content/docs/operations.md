@@ -32,6 +32,45 @@ t4 run \
   --s3-endpoint http://minio:9000
 ```
 
+### Object-store encryption at rest
+
+Enable client-side encryption for all T4 object-store data with a 32-byte AES-256 key:
+
+```bash
+openssl rand -base64 32 > /etc/t4/object-key.b64
+chmod 0400 /etc/t4/object-key.b64
+
+t4 run \
+  --data-dir /var/lib/t4 \
+  --listen 0.0.0.0:3379 \
+  --s3-bucket my-bucket \
+  --s3-prefix t4/ \
+  --object-store-encryption-key-file /etc/t4/object-key.b64
+```
+
+The key file may contain raw 32-byte material, 64 hex characters, or base64. To keep the key out of the process
+argument list, store the key material in an environment variable and pass the variable name:
+
+```bash
+export T4_OBJECT_KEY="$(openssl rand -base64 32)"
+
+t4 run \
+  --data-dir /var/lib/t4 \
+  --s3-bucket my-bucket \
+  --s3-prefix t4/ \
+  --object-store-encryption-key-env T4_OBJECT_KEY
+```
+
+Every node that uses the same S3 prefix must use the same key. The same key is also required for `t4 restore`,
+`t4 branch`, `t4 gc`, and `t4 status` when those commands read an encrypted prefix.
+
+Object-store encryption is not an online migration for an existing plaintext prefix. Start with a fresh S3 prefix, or
+restore the plaintext data and write it to a new encrypted prefix. Do not mix encrypted and plaintext objects under the
+same prefix.
+
+This protects S3 object bodies only. Object keys remain visible, and local Pebble/WAL file contents remain plaintext
+unless the host filesystem or volume encrypts them.
+
 ---
 
 ## Multi-node cluster
@@ -423,6 +462,15 @@ t4 status \
   --s3-prefix t4/
 ```
 
+For encrypted prefixes, include the same encryption key flags used by the node:
+
+```bash
+t4 status \
+  --s3-bucket my-bucket \
+  --s3-prefix t4/ \
+  --object-store-encryption-key-file /etc/t4/object-key.b64
+```
+
 ```
 S3 status  s3://my-bucket/t4/
 
@@ -625,6 +673,9 @@ t4 gc \
   --keep 3
 ```
 
+For encrypted prefixes, run GC with the same encryption key flags so branch registry entries, manifests, and checkpoint
+indexes can be decrypted before deletion decisions are made.
+
 `--keep` (default: 3) sets how many of the most recent checkpoints to retain. The command performs three passes in
 order:
 
@@ -686,6 +737,9 @@ t4 run \
 
 On first boot the branch node downloads SSTs and Pebble metadata from the source prefix. On subsequent restarts
 `--branch-checkpoint` is ignored (the local data directory already exists).
+
+For encrypted source prefixes, pass the source key to `t4 branch fork` and to the branch node. Source and branch prefixes
+must use the same key when the branch inherits SSTs from the source.
 
 ### Creating a branch (Go library)
 

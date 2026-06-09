@@ -27,7 +27,8 @@ import (
 
 func runCmd() *cobra.Command {
 	var (
-		s3 *s3Flags
+		s3  *s3Flags
+		enc *objectStoreEncryptionFlags
 
 		dataDir               string
 		listenAddr            string
@@ -109,6 +110,7 @@ func runCmd() *cobra.Command {
 				metricsAddr,
 				branchPrefix,
 				branchCheckpoint,
+				enc,
 			)).Info("starting t4 server")
 
 			cfg := t4.Config{
@@ -125,6 +127,14 @@ func runCmd() *cobra.Command {
 				FollowerMaxRetries:  followerMaxRetries,
 				FollowerWaitMode:    t4.FollowerWaitMode(followerWaitMode),
 				WatchSendTimeout:    watchSendTimeout,
+			}
+			encCfg, err := enc.config()
+			if err != nil {
+				return fmt.Errorf("encryption key: %w", err)
+			}
+			cfg.ObjectStoreEncryption = encCfg
+			if encCfg != nil {
+				logrus.Info("object-store encryption at rest enabled (AES-256-GCM)")
 			}
 
 			if walSyncUpload != "" {
@@ -259,6 +269,7 @@ func runCmd() *cobra.Command {
 	}
 
 	s3 = addS3Flags(cmd, false)
+	enc = addObjectStoreEncryptionFlags(cmd)
 	cmd.Flags().StringVar(&dataDir, "data-dir", "/var/lib/t4", "directory for Pebble data and local WAL segments (env: T4_DATA_DIR)")
 	cmd.Flags().StringVar(&listenAddr, "listen", "0.0.0.0:3379", "gRPC listen address (kine/etcd protocol) (env: T4_LISTEN)")
 	cmd.Flags().Int64Var(&segmentMaxSizeMB, "segment-max-size-mb", 50, "WAL segment rotation size threshold in MiB (env: T4_SEGMENT_MAX_SIZE_MB)")
@@ -359,6 +370,7 @@ func startupLogFields(
 	metricsAddr string,
 	branchPrefix string,
 	branchCheckpoint string,
+	enc *objectStoreEncryptionFlags,
 ) logrus.Fields {
 	fields := logrus.Fields{
 		"data_dir":                  dataDir,
@@ -381,6 +393,7 @@ func startupLogFields(
 		"peer_tls":                  tlsMode(peerTLSCert, peerTLSCA),
 		"auth":                      authMode(authEnabled, tokenTTLSec),
 		"metrics_addr":              valueOrDisabled(metricsAddr),
+		"object_store_encryption":   enc.enabled(),
 	}
 
 	if branchCheckpoint != "" {
