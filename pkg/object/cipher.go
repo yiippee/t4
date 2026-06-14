@@ -65,8 +65,8 @@ type encryptedVersionedStore struct {
 
 type encryptedConditionalVersionedStore struct {
 	*encryptedStore
-	conditional ConditionalStore
-	versioned   VersionedStore
+	conditional *encryptedConditionalStore
+	versioned   *encryptedVersionedStore
 }
 
 // NewEncryptedStore wraps s with transparent AES-256-GCM encryption.
@@ -83,8 +83,8 @@ func NewEncryptedStore(s Store, kp KeyProvider) Store {
 	case hasConditional && hasVersioned:
 		return &encryptedConditionalVersionedStore{
 			encryptedStore: base,
-			conditional:    cs,
-			versioned:      vs,
+			conditional:    &encryptedConditionalStore{encryptedStore: base, inner: cs},
+			versioned:      &encryptedVersionedStore{encryptedStore: base, inner: vs},
 		}
 	case hasConditional:
 		return &encryptedConditionalStore{encryptedStore: base, inner: cs}
@@ -200,19 +200,19 @@ func (s *encryptedVersionedStore) GetVersioned(ctx context.Context, key, version
 }
 
 func (s *encryptedConditionalVersionedStore) GetETag(ctx context.Context, key string) (*GetWithETag, error) {
-	return (&encryptedConditionalStore{encryptedStore: s.encryptedStore, inner: s.conditional}).GetETag(ctx, key)
+	return s.conditional.GetETag(ctx, key)
 }
 
 func (s *encryptedConditionalVersionedStore) PutIfAbsent(ctx context.Context, key string, r io.Reader) error {
-	return (&encryptedConditionalStore{encryptedStore: s.encryptedStore, inner: s.conditional}).PutIfAbsent(ctx, key, r)
+	return s.conditional.PutIfAbsent(ctx, key, r)
 }
 
 func (s *encryptedConditionalVersionedStore) PutIfMatch(ctx context.Context, key string, r io.Reader, matchETag string) error {
-	return (&encryptedConditionalStore{encryptedStore: s.encryptedStore, inner: s.conditional}).PutIfMatch(ctx, key, r, matchETag)
+	return s.conditional.PutIfMatch(ctx, key, r, matchETag)
 }
 
 func (s *encryptedConditionalVersionedStore) GetVersioned(ctx context.Context, key, versionID string) (io.ReadCloser, error) {
-	return (&encryptedVersionedStore{encryptedStore: s.encryptedStore, inner: s.versioned}).GetVersioned(ctx, key, versionID)
+	return s.versioned.GetVersioned(ctx, key, versionID)
 }
 
 func encryptStream(key string, w io.Writer, r io.Reader, aesKey [32]byte, keyID uint8) error {

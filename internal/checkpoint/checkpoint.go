@@ -565,11 +565,8 @@ func (mgr *Manager) ReadCheckpointIndex(ctx context.Context, store object.Store,
 	return &idx, nil
 }
 
-func downloadFile(ctx context.Context, store object.Store, key, dest string) error {
-	rc, err := store.Get(ctx, key)
-	if err != nil {
-		return err
-	}
+// streamToFile copies rc to dest and closes rc.
+func streamToFile(rc io.ReadCloser, dest string) error {
 	defer func() { _ = rc.Close() }()
 	f, err := os.Create(dest)
 	if err != nil {
@@ -580,20 +577,21 @@ func downloadFile(ctx context.Context, store object.Store, key, dest string) err
 	return err
 }
 
+func downloadFile(ctx context.Context, store object.Store, key, dest string) error {
+	rc, err := store.Get(ctx, key)
+	if err != nil {
+		return err
+	}
+	return streamToFile(rc, dest)
+}
+
 func downloadVersionedOrLive(ctx context.Context, store object.VersionedStore, key string, versions map[string]string, dest string) error {
 	if versionID := versions[key]; versionID != "" {
 		rc, err := store.GetVersioned(ctx, key, versionID)
 		if err != nil {
 			return err
 		}
-		defer func() { _ = rc.Close() }()
-		f, err := os.Create(dest)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = f.Close() }()
-		_, err = io.Copy(f, rc)
-		return err
+		return streamToFile(rc, dest)
 	}
 	return downloadFile(ctx, store, key, dest)
 }

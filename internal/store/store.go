@@ -263,6 +263,18 @@ func (s *Store) Apply(entries []wal.Entry) error {
 			maxSeq = seq
 		}
 	}
+	if err := s.commitBatch(b, maxRev, maxSeq, false); err != nil {
+		return err
+	}
+	s.broadcast()
+	return nil
+}
+
+// commitBatch writes the current-revision and last-sequence meta keys into b,
+// commits it (durably when sync is true), then advances the in-memory
+// currentRev/lastSeq counters. The counters only ever move forward. On any
+// error b is closed and the error is returned.
+func (s *Store) commitBatch(b *pebble.Batch, maxRev, maxSeq int64, sync bool) error {
 	if maxRev > 0 {
 		if err := b.Set(metaCurrentRevKey, encodeRev(maxRev), pebble.NoSync); err != nil {
 			_ = b.Close()
@@ -275,17 +287,20 @@ func (s *Store) Apply(entries []wal.Entry) error {
 			return fmt.Errorf("store: set last seq: %w", err)
 		}
 	}
-	if err := b.Commit(pebble.NoSync); err != nil {
+	writeOpts := pebble.NoSync
+	if sync {
+		writeOpts = pebble.Sync
+	}
+	if err := b.Commit(writeOpts); err != nil {
 		_ = b.Close()
 		return fmt.Errorf("store: commit batch: %w", err)
 	}
-	if maxRev > 0 {
+	if maxRev > atomic.LoadInt64(&s.currentRev) {
 		atomic.StoreInt64(&s.currentRev, maxRev)
 	}
-	if maxSeq > 0 && maxSeq > atomic.LoadInt64(&s.lastSeq) {
+	if maxSeq > atomic.LoadInt64(&s.lastSeq) {
 		atomic.StoreInt64(&s.lastSeq, maxSeq)
 	}
-	s.broadcast()
 	return nil
 }
 
@@ -351,29 +366,7 @@ func (s *Store) Recover(entries []wal.Entry) error {
 			maxRev = e.Revision
 		}
 	}
-	if maxRev > 0 {
-		if err := b.Set(metaCurrentRevKey, encodeRev(maxRev), pebble.NoSync); err != nil {
-			_ = b.Close()
-			return fmt.Errorf("store: set current rev: %w", err)
-		}
-	}
-	if maxSeq > 0 {
-		if err := b.Set(metaLastSeqKey, encodeRev(maxSeq), pebble.NoSync); err != nil {
-			_ = b.Close()
-			return fmt.Errorf("store: set last seq: %w", err)
-		}
-	}
-	if err := b.Commit(pebble.Sync); err != nil {
-		_ = b.Close()
-		return fmt.Errorf("store: commit recover batch: %w", err)
-	}
-	if maxRev > atomic.LoadInt64(&s.currentRev) {
-		atomic.StoreInt64(&s.currentRev, maxRev)
-	}
-	if maxSeq > atomic.LoadInt64(&s.lastSeq) {
-		atomic.StoreInt64(&s.lastSeq, maxSeq)
-	}
-	return nil
+	return s.commitBatch(b, maxRev, maxSeq, true)
 }
 
 func (s *Store) applyEntry(b *pebble.Batch, e *wal.Entry) error {
@@ -655,6 +648,19 @@ func (s *Store) getIdxRev(key string) (int64, error) {
 	return rev, nil
 }
 
+// recordToKV builds a KeyValue from a decoded log record at the given revision.
+func recordToKV(key string, rev int64, r *record) *KeyValue {
+	return &KeyValue{
+		Key:            key,
+		Value:          r.value,
+		Revision:       rev,
+		CreateRevision: r.createRevision,
+		PrevRevision:   r.prevRevision,
+		Version:        recordVersion(r),
+		Lease:          r.lease,
+	}
+}
+
 func (s *Store) getLogEntry(key string, rev int64) (*KeyValue, error) {
 	// Fast path: non-txn entries are stored at logKey(rev).
 	v, closer, err := s.db.Get(logKey(rev))
@@ -664,15 +670,7 @@ func (s *Store) getLogEntry(key string, rev int64) (*KeyValue, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &KeyValue{
-			Key:            key,
-			Value:          r.value,
-			Revision:       rev,
-			CreateRevision: r.createRevision,
-			PrevRevision:   r.prevRevision,
-			Version:        recordVersion(r),
-			Lease:          r.lease,
-		}, nil
+		return recordToKV(key, rev, r), nil
 	}
 	if err != pebble.ErrNotFound {
 		return nil, fmt.Errorf("store: get log rev=%d: %w", rev, err)
@@ -693,15 +691,7 @@ func (s *Store) getLogEntry(key string, rev int64) (*KeyValue, error) {
 			continue
 		}
 		if r.key == key {
-			return &KeyValue{
-				Key:            key,
-				Value:          r.value,
-				Revision:       rev,
-				CreateRevision: r.createRevision,
-				PrevRevision:   r.prevRevision,
-				Version:        recordVersion(r),
-				Lease:          r.lease,
-			}, nil
+			return recordToKV(key, rev, r), nil
 		}
 	}
 	return nil, fmt.Errorf("store: get log rev=%d key=%q: not found in txn sub-ops", rev, key)
@@ -729,15 +719,7 @@ func (s *Store) getAtRevision(key string, targetRev int64) (*KeyValue, error) {
 		if r.delete {
 			return nil, nil
 		}
-		return &KeyValue{
-			Key:            r.key,
-			Value:          r.value,
-			Revision:       rev,
-			CreateRevision: r.createRevision,
-			PrevRevision:   r.prevRevision,
-			Version:        recordVersion(r),
-			Lease:          r.lease,
-		}, nil
+		return recordToKV(r.key, rev, r), nil
 	}
 	return nil, iter.Error()
 }
@@ -796,15 +778,21 @@ func (s *Store) ListRange(prefix string, opts ReadOptions) ([]*KeyValue, error) 
 	return out, nil
 }
 
-func (s *Store) listCurrent(prefix, fromKey string, limit int64) ([]*KeyValue, error) {
-	lower := idxKey(prefix)
+// idxBounds returns the index-iteration bounds for keys with prefix, advancing
+// the lower bound to fromKey when fromKey is lexicographically beyond prefix.
+func idxBounds(prefix, fromKey string) (lower, upper []byte) {
+	lower = idxKey(prefix)
 	if fromKey != "" {
 		fromLower := idxKey(fromKey)
 		if string(fromLower) > string(lower) {
 			lower = fromLower
 		}
 	}
-	upper := idxKeyUpper(prefix)
+	return lower, idxKeyUpper(prefix)
+}
+
+func (s *Store) listCurrent(prefix, fromKey string, limit int64) ([]*KeyValue, error) {
+	lower, upper := idxBounds(prefix, fromKey)
 
 	iter, err := s.db.NewIter(&pebble.IterOptions{
 		LowerBound: lower,
@@ -851,14 +839,7 @@ func (s *Store) CountRange(prefix string, opts ReadOptions) (int64, error) {
 // countCurrent counts live keys with prefix at HEAD whose key is
 // lexicographically >= fromKey when fromKey is set.
 func (s *Store) countCurrent(prefix, fromKey string) (int64, error) {
-	lower := idxKey(prefix)
-	if fromKey != "" {
-		fromLower := idxKey(fromKey)
-		if string(fromLower) > string(lower) {
-			lower = fromLower
-		}
-	}
-	upper := idxKeyUpper(prefix)
+	lower, upper := idxBounds(prefix, fromKey)
 	iter, err := s.db.NewIter(&pebble.IterOptions{
 		LowerBound: lower,
 		UpperBound: upper,
@@ -1057,15 +1038,7 @@ func (s *Store) scanLog(prefix string, fromRev, toRev int64, withPrevKV bool) ([
 		if prefix != "" && (len(r.key) < len(prefix) || r.key[:len(prefix)] != prefix) {
 			continue
 		}
-		kv := &KeyValue{
-			Key:            r.key,
-			Value:          r.value,
-			Revision:       rev,
-			CreateRevision: r.createRevision,
-			PrevRevision:   r.prevRevision,
-			Version:        recordVersion(r),
-			Lease:          r.lease,
-		}
+		kv := recordToKV(r.key, rev, r)
 		var prevKV *KeyValue
 		if withPrevKV && r.prevRevision > 0 {
 			prevKV, err = s.getLogEntry(r.key, r.prevRevision)
