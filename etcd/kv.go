@@ -39,17 +39,9 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 			return &etcdserverpb.RangeResponse{Header: header()}, nil
 		}
 		if r.CountOnly {
-			var (
-				exists bool
-				err    error
-			)
-			if linearizable {
-				exists, err = s.node.LinearizableExists(ctx, key, t4.WithRevision(readRev))
-			} else {
-				exists, err = s.node.Exists(key, t4.WithRevision(readRev))
-			}
+			exists, err := s.rangeExists(ctx, linearizable, key, t4.WithRevision(readRev))
 			if err != nil {
-				return nil, rangeReadError(err)
+				return nil, kvError(err)
 			}
 			count := int64(0)
 			if exists {
@@ -57,17 +49,9 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 			}
 			return &etcdserverpb.RangeResponse{Header: header(), Count: count}, nil
 		}
-		var (
-			kv  *t4.KeyValue
-			err error
-		)
-		if linearizable {
-			kv, err = s.node.LinearizableGet(ctx, key, t4.WithRevision(readRev))
-		} else {
-			kv, err = s.node.Get(key, t4.WithRevision(readRev))
-		}
+		kv, err := s.rangeGet(ctx, linearizable, key, t4.WithRevision(readRev))
 		if err != nil {
-			return nil, rangeReadError(err)
+			return nil, kvError(err)
 		}
 		resp := &etcdserverpb.RangeResponse{Header: header()}
 		if kv != nil {
@@ -83,32 +67,16 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 
 	if r.CountOnly {
 		if isExactPrefixRange(key, rangeEnd) {
-			var (
-				count int64
-				err   error
-			)
-			if linearizable {
-				count, err = s.node.LinearizableCount(ctx, scanPrefix, t4.WithRevision(readRev))
-			} else {
-				count, err = s.node.Count(scanPrefix, t4.WithRevision(readRev))
-			}
+			count, err := s.rangeCount(ctx, linearizable, scanPrefix, t4.WithRevision(readRev))
 			if err != nil {
-				return nil, rangeReadError(err)
+				return nil, kvError(err)
 			}
 			return &etcdserverpb.RangeResponse{Header: header(), Count: count}, nil
 		}
 
-		var (
-			all []*t4.KeyValue
-			err error
-		)
-		if linearizable {
-			all, err = s.node.LinearizableList(ctx, scanPrefix, t4.WithRevision(readRev))
-		} else {
-			all, err = s.node.List(scanPrefix, t4.WithRevision(readRev))
-		}
+		all, err := s.rangeList(ctx, linearizable, scanPrefix, t4.WithRevision(readRev))
 		if err != nil {
-			return nil, rangeReadError(err)
+			return nil, kvError(err)
 		}
 		var count int64
 		for _, kv := range all {
@@ -125,22 +93,13 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 		err error
 	)
 	if isExactPrefixRange(key, rangeEnd) && r.Limit > 0 {
-		var total int64
-		if linearizable {
-			total, err = s.node.LinearizableCount(ctx, scanPrefix, t4.WithRevision(readRev))
-		} else {
-			total, err = s.node.Count(scanPrefix, t4.WithRevision(readRev))
+		total, cerr := s.rangeCount(ctx, linearizable, scanPrefix, t4.WithRevision(readRev))
+		if cerr != nil {
+			return nil, kvError(cerr)
 		}
+		all, err = s.rangeList(ctx, linearizable, scanPrefix, t4.WithLimit(r.Limit), t4.WithRevision(readRev))
 		if err != nil {
-			return nil, rangeReadError(err)
-		}
-		if linearizable {
-			all, err = s.node.LinearizableList(ctx, scanPrefix, t4.WithLimit(r.Limit), t4.WithRevision(readRev))
-		} else {
-			all, err = s.node.List(scanPrefix, t4.WithLimit(r.Limit), t4.WithRevision(readRev))
-		}
-		if err != nil {
-			return nil, rangeReadError(err)
+			return nil, kvError(err)
 		}
 		kvs := make([]*mvccpb.KeyValue, 0, len(all))
 		for _, kv := range all {
@@ -154,13 +113,9 @@ func (s *Server) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcd
 		}, nil
 	}
 
-	if linearizable {
-		all, err = s.node.LinearizableList(ctx, scanPrefix, t4.WithRevision(readRev))
-	} else {
-		all, err = s.node.List(scanPrefix, t4.WithRevision(readRev))
-	}
+	all, err = s.rangeList(ctx, linearizable, scanPrefix, t4.WithRevision(readRev))
 	if err != nil {
-		return nil, rangeReadError(err)
+		return nil, kvError(err)
 	}
 
 	total := int64(0)
@@ -506,8 +461,34 @@ func (s *Server) rangeHeader(readRev int64) *etcdserverpb.ResponseHeader {
 	return s.header()
 }
 
-func rangeReadError(err error) error {
-	return kvError(err)
+// rangeGet / rangeExists / rangeList / rangeCount dispatch to the linearizable
+// or local variant of each read, removing the repeated if/else fork from Range.
+func (s *Server) rangeGet(ctx context.Context, lin bool, key string, opts ...t4.ReadOption) (*t4.KeyValue, error) {
+	if lin {
+		return s.node.LinearizableGet(ctx, key, opts...)
+	}
+	return s.node.Get(key, opts...)
+}
+
+func (s *Server) rangeExists(ctx context.Context, lin bool, key string, opts ...t4.ReadOption) (bool, error) {
+	if lin {
+		return s.node.LinearizableExists(ctx, key, opts...)
+	}
+	return s.node.Exists(key, opts...)
+}
+
+func (s *Server) rangeList(ctx context.Context, lin bool, prefix string, opts ...t4.ReadOption) ([]*t4.KeyValue, error) {
+	if lin {
+		return s.node.LinearizableList(ctx, prefix, opts...)
+	}
+	return s.node.List(prefix, opts...)
+}
+
+func (s *Server) rangeCount(ctx context.Context, lin bool, prefix string, opts ...t4.ReadOption) (int64, error) {
+	if lin {
+		return s.node.LinearizableCount(ctx, prefix, opts...)
+	}
+	return s.node.Count(prefix, opts...)
 }
 
 func kvError(err error) error {
