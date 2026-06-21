@@ -341,6 +341,7 @@ func (w *WAL) rotateSyncLocked(rollbackSize int64, rollbackEntryCount int) error
 		return fmt.Errorf("wal: open segment after sync rotate: %w", err)
 	}
 	w.active = sw
+	_ = w.removeUploadedSegment(localPath)
 	return nil
 }
 
@@ -452,6 +453,8 @@ func (w *WAL) uploadLoop(ctx context.Context) {
 					case <-ctx.Done():
 					}
 				}(task)
+			} else {
+				_ = w.removeUploadedSegment(task.localPath)
 			}
 		case <-ctx.Done():
 			return
@@ -517,6 +520,8 @@ func (w *WAL) Close() error {
 				if uploadErr == nil {
 					uploadErr = err
 				}
+			} else if err := w.removeUploadedSegment(task.localPath); err != nil && uploadErr == nil {
+				uploadErr = err
 			}
 		default:
 			goto drained
@@ -530,9 +535,22 @@ drained:
 			if uploadErr == nil {
 				uploadErr = err
 			}
+		} else if err := w.removeUploadedSegment(finalSeg.Path()); err != nil && uploadErr == nil {
+			uploadErr = err
 		}
 	}
 	return uploadErr
+}
+
+func (w *WAL) removeUploadedSegment(path string) error {
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		w.log.Warnf("wal: remove uploaded segment %q: %v", path, err)
+		return err
+	}
+	return nil
 }
 
 // SealAndFlush seals the active segment immediately (blocking) and queues it

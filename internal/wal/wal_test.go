@@ -238,11 +238,45 @@ func TestWALSyncUploadFailureDoesNotReplayFailedBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen WAL: %v", err)
 	}
+	defer reopened.Close()
 	recovered := &recordingRecoveryStore{}
 	if err := reopened.ReplayLocal(recovered, 0); err != nil {
 		t.Fatalf("ReplayLocal: %v", err)
 	}
 	if got := len(recovered.entries); got != 0 {
 		t.Fatalf("ReplayLocal recovered %d entries from failed sync upload, want 0", got)
+	}
+}
+
+func TestWALSyncUploadRemovesUploadedSegment(t *testing.T) {
+	dir := t.TempDir()
+	uploaded := make(map[string]bool)
+	uploader := func(_ context.Context, localPath, objectKey string) error {
+		if _, err := os.ReadFile(localPath); err != nil {
+			return err
+		}
+		uploaded[objectKey] = true
+		return nil
+	}
+
+	w, err := Open(dir, 1, 1, WithUploader(uploader), WithSyncUpload())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	w.Start(ctx)
+	defer func() {
+		cancel()
+		_ = w.Close()
+	}()
+
+	if err := w.AppendBatch(ctx, makeEntries(1, 1, 1)); err != nil {
+		t.Fatalf("AppendBatch: %v", err)
+	}
+	if !uploaded[ObjectKey(1, 1)] {
+		t.Fatalf("expected segment %q to be uploaded", ObjectKey(1, 1))
+	}
+	if _, err := os.Stat(filepath.Join(dir, SegmentName(1, 1))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("uploaded segment should be removed locally, stat err=%v", err)
 	}
 }

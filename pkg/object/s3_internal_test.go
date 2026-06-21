@@ -114,3 +114,11 @@ func TestS3EndpointHostDefaultsToAWS(t *testing.T) {
 		t.Fatalf("want %q, got %q", defaultAWSS3Endpoint, got)
 	}
 }
+
+func TestS3StoreKeyNormalizesTrailingPrefixSlash(t *testing.T) {
+	store := NewS3Store(nil, "bucket", "t4/")
+
+	if got := store.key("manifest/latest"); got != "t4/manifest/latest" {
+		t.Fatalf("want normalized key %q, got %q", "t4/manifest/latest", got)
+	}
+}

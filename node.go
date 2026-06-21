@@ -1209,14 +1209,18 @@ func makeUploader(obj object.Store, log Logger) wal.Uploader {
 			log.Errorf("uploader: local file %q is gone AND %q is not in S3 — segment data is lost", localPath, objectKey)
 			return fmt.Errorf("uploader: open %q: %w", localPath, err)
 		}
-		defer f.Close()
 		start := time.Now()
 		if err := obj.Put(ctx, objectKey, f); err != nil {
 			metrics.WALUploadErrors.Inc()
+			_ = f.Close()
 			return err
+		}
+		if err := f.Close(); err != nil {
+			metrics.WALUploadErrors.Inc()
+			return fmt.Errorf("uploader: close %q: %w", localPath, err)
 		}
 		metrics.WALUploadsTotal.Inc()
 		metrics.WALUploadDuration.Observe(time.Since(start).Seconds())
-		return os.Remove(localPath)
+		return nil
 	}
 }
